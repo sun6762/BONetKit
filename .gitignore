@@ -1,0 +1,22 @@
+.DS_Store
+
+# Local project notes
+PROJECT_OVERVIEW.md
+
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# CocoaPods
+Pods/
+
+# Generated example workspace/project
+Example/*.xcodeproj/
+Example/*.xcworkspace/
+Example/build/

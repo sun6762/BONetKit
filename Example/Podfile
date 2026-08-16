@@ -1,0 +1,21 @@
+platform :ios, '13.0'
+
+target 'BONetKitExample' do
+  use_frameworks!
+
+  # 引用本仓库根目录的 BONetKit（本地路径），间接引入 Alamofire。
+  pod 'BONetKit', :path => '../'
+
+  # 显式锁定 Alamofire 到 5.8.x（库的 podspec 声明为 ~> 5.8，
+  # 此处在示例工程中约束为 5.8 稳定版）。
+  pod 'Alamofire', '~> 5.8.0'
+
+  # 仅示例工程使用：Keychain 封装，用于 UserSessionKeychain 演示（生产级 token 存储）。
+  # 注意：此依赖不属于 BONetKit 库本身，库的 podspec 未引入它。
+  pod 'KeychainAccess', '~> 4.2'
+
+  # 集成测试 target：继承 app 的 pod 搜索路径，从而能 import BONetKit。
+  target 'BONetKitExampleTests' do
+    inherit! :search_paths
+  end
+end

@@ -1,0 +1,37 @@
+name: BONetKitExample
+options:
+  bundleIdPrefix: com.sun6762.bonetkit
+  deploymentTarget:
+    iOS: "13.0"
+targets:
+  BONetKitExample:
+    type: application
+    platform: iOS
+    sources:
+      - BONetKitExample
+    info:
+      path: BONetKitExample/Info.plist
+      properties:
+        UILaunchStoryboardName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sun6762.bonetkit.example
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+  BONetKitExampleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - BONetKitExampleTests
+    dependencies:
+      - target: BONetKitExample
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sun6762.bonetkit.example.tests
+        GENERATE_INFOPLIST_FILE: YES

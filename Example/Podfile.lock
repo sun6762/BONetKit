@@ -1,0 +1,28 @@
+PODS:
+  - Alamofire (5.8.1)
+  - BONetKit (0.1.0):
+    - Alamofire (~> 5.8)
+  - KeychainAccess (4.2.2)
+
+DEPENDENCIES:
+  - Alamofire (~> 5.8.0)
+  - BONetKit (from `../`)
+  - KeychainAccess (~> 4.2)
+
+SPEC REPOS:
+  trunk:
+    - Alamofire
+    - KeychainAccess
+
+EXTERNAL SOURCES:
+  BONetKit:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  Alamofire: 3ca42e259043ee0dc5c0cdd76c4bc568b8e42af7
+  BONetKit: 6a5e5f23a95e5f2a057f0f3270f659d8e94b5048
+  KeychainAccess: c0c4f7f38f6fc7bbe58f5702e25f7bd2f65abf51
+
+PODFILE CHECKSUM: c43a9a139637206299853b0cbc8cbfe13b453323
+
+COCOAPODS: 1.17.0
