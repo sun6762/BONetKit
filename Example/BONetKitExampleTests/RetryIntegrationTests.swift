@@ -60,4 +60,49 @@ final class RetryIntegrationTests: XCTestCase {
         }
         wait(for: [exp], timeout: 5)
     }
+
+    /// RETRY-01：POST（非幂等）默认不重试，弱网首次失败即失败（即便 maxRetryCount>0）。
+    func testPOSTNotRetriedByDefault() {
+        DemoMockURLProtocol.resetWeakNetworkCounter()
+        BONetClient.shared.configure(
+            BONetConfiguration(
+                baseURL: "https://mock.local",
+                maxRetryCount: 2,                        // 允许重试次数 > 0
+                protocolClasses: [DemoMockURLProtocol.self]
+            )
+        )
+
+        let exp = expectation(description: "POST not retried")
+        BONetClient.shared.request("/posts/weak", method: .post, of: DemoPostModel.self) { result in
+            if case .failure = result {
+                exp.fulfill()   // POST 非幂等，默认不重试 → 首次失败即失败
+            } else {
+                XCTFail("POST 默认不应重试")
+            }
+        }
+        wait(for: [exp], timeout: 5)
+    }
+
+    /// RETRY-01：POST 显式开启 allowsRetryOnNonIdempotent 后，可重试并成功。
+    func testPOSTRetriesWhenExplicitlyAllowed() {
+        DemoMockURLProtocol.resetWeakNetworkCounter()
+        BONetClient.shared.configure(
+            BONetConfiguration(
+                baseURL: "https://mock.local",
+                maxRetryCount: 2,
+                protocolClasses: [DemoMockURLProtocol.self]
+            )
+        )
+
+        let exp = expectation(description: "POST retried when allowed")
+        BONetClient.shared.request("/posts/weak", method: .post, of: DemoPostModel.self,
+                                   allowsRetryOnNonIdempotent: true) { result in
+            if case .success = result {
+                exp.fulfill()   // 显式允许 → 重试后成功
+            } else {
+                XCTFail("显式允许后 POST 应重试成功")
+            }
+        }
+        wait(for: [exp], timeout: 5)
+    }
 }

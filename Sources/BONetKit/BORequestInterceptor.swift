@@ -31,8 +31,11 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
     ) {
         var request = urlRequest
 
-        // 注入公共请求头。
-        for (field, value) in configuration.commonHeaders {
+        // 注入公共请求头。单次请求头优先：仅当该字段尚不存在时才写入公共值，
+        // 避免公共头覆盖调用方在本次请求显式设置的同名头（HEADER-01）。
+        // `value(forHTTPHeaderField:)` 大小写不敏感，天然按 HTTP 规范匹配。
+        for (field, value) in configuration.commonHeaders
+        where request.value(forHTTPHeaderField: field) == nil {
             request.setValue(value, forHTTPHeaderField: field)
         }
 
@@ -50,7 +53,13 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
         completion(.success(request))
     }
 
-    /// 失败重试策略：仅对可重试的底层错误重试，且不超过配置的最大次数。
+    /// 失败重试策略。
+    ///
+    /// 安全约束（RETRY-01）：默认只对**幂等方法**（GET/HEAD/PUT/DELETE/OPTIONS/TRACE）自动重试；
+    /// POST/PATCH 等非幂等方法默认不重试，避免重复下单/支付/提交等副作用。
+    /// 若某个非幂等请求确认可安全重试，可在 `request(...)` 时开启 `allowsRetryOnNonIdempotent`。
+    ///
+    /// 重试延迟采用指数退避 + 随机抖动，而非固定间隔。
     func retry(
         _ request: Request,
         for session: Session,
@@ -63,14 +72,33 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
             return
         }
 
-        // 仅对具备可重试性的 URLError（如超时、连接中断）重试。
-        if let urlError = error.asAFError?.underlyingError as? URLError,
-           Self.retryableURLErrorCodes.contains(urlError.code) {
-            completion(.retryWithDelay(0.5))
-        } else {
+        // 仅对可重试的底层 URLError（超时、连接中断等）重试。
+        guard let urlError = error.asAFError?.underlyingError as? URLError,
+              Self.retryableURLErrorCodes.contains(urlError.code) else {
             completion(.doNotRetry)
+            return
         }
+
+        // 幂等性检查：非幂等方法默认不重试，除非请求显式开启。
+        let method = request.request?.httpMethod?.uppercased() ?? "GET"
+        let isIdempotent = Self.idempotentMethods.contains(method)
+        let explicitlyAllowed = request.request?
+            .value(forHTTPHeaderField: Self.allowRetryHeader) == "1"
+        guard isIdempotent || explicitlyAllowed else {
+            completion(.doNotRetry)
+            return
+        }
+
+        completion(.retryWithDelay(Self.backoffDelay(forRetryCount: request.retryCount)))
     }
+
+    /// 幂等 HTTP 方法（可安全自动重试）。
+    private static let idempotentMethods: Set<String> = [
+        "GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"
+    ]
+
+    /// 标记「本请求允许在非幂等方法下重试」的内部请求头。
+    static let allowRetryHeader = "X-BONet-Allow-Retry"
 
     /// 可重试的 URLError 错误码集合。
     private static let retryableURLErrorCodes: Set<URLError.Code> = [
@@ -79,4 +107,12 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
         .notConnectedToInternet,
         .cannotConnectToHost
     ]
+
+    /// 指数退避 + 随机抖动：base * 2^retryCount + [0, 0.5) 随机抖动，上限 30s。
+    private static func backoffDelay(forRetryCount retryCount: Int) -> TimeInterval {
+        let base = 0.5
+        let exponential = base * pow(2.0, Double(retryCount))
+        let jitter = Double.random(in: 0..<0.5)
+        return min(exponential + jitter, 30)
+    }
 }

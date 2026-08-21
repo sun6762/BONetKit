@@ -13,6 +13,10 @@ private struct FlexModel: Decodable {
     @BOFlexible var boolValue: Bool
 }
 
+private struct OptModel: Decodable {
+    @BOFlexibleOptional var score: Int?
+}
+
 private struct Item: Decodable, Equatable {
     let sku: String
 }
@@ -68,5 +72,30 @@ final class BOFlexibleDecodingTests: XCTestCase {
         let json = #"{ "items": [ { "sku": "x1" }, { "sku": "x2" } ] }"#
         let m = try decode(json, as: ArrModel.self)
         XCTAssertEqual(m.items.values.count, 2)
+    }
+
+    // MARK: - FLEX-01：BOFlexibleOptional
+
+    func testFlexibleOptionalMissingKey() throws {
+        // 字段缺失 → nil
+        let m = try decode(#"{}"#, as: OptModel.self)
+        XCTAssertNil(m.score)
+    }
+
+    func testFlexibleOptionalNull() throws {
+        // JSON null → nil
+        let m = try decode(#"{ "score": null }"#, as: OptModel.self)
+        XCTAssertNil(m.score)
+    }
+
+    func testFlexibleOptionalValueConverted() throws {
+        // 字符串 "25" → Int 25
+        let m = try decode(#"{ "score": "25" }"#, as: OptModel.self)
+        XCTAssertEqual(m.score, 25)
+    }
+
+    func testFlexibleOptionalInvalidThrows() {
+        // 无效非空值（无法转 Int）应抛错，不静默变 nil
+        XCTAssertThrowsError(try decode(#"{ "score": {"a":1} }"#, as: OptModel.self))
     }
 }

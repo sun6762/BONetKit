@@ -52,11 +52,22 @@ public protocol BOTokenStore: AnyObject {
 
     /// 由 accessToken 生成鉴权头值，默认 `"Bearer \(token)"`。
     func headerValue(for accessToken: String) -> String
+
+    /// 注册凭证变化观察者（兜底同步用）。
+    ///
+    /// 当 `credential` 被外部直接赋值时，实现应回调 `observer` 通知新值。
+    /// `BONetClient` 借此在凭证变化时自动同步给认证拦截器——即便调用方绕过
+    /// `updateCredential(_:)` 直接写 store，也能保持一致。
+    ///
+    /// 默认空实现：不支持观察的自定义 store 不受影响（但直接写 store 不会自动同步，
+    /// 此时应改用 `BONetClient.updateCredential(_:)`）。
+    func setCredentialObserver(_ observer: ((BOCredential?) -> Void)?)
 }
 
 public extension BOTokenStore {
     var headerField: String { "Authorization" }
     func headerValue(for accessToken: String) -> String { "Bearer \(accessToken)" }
+    func setCredentialObserver(_ observer: ((BOCredential?) -> Void)?) {}
 }
 
 /// 内置的线程安全内存 token store（开箱即用）。
@@ -72,6 +83,7 @@ public final class BOInMemoryTokenStore: BOTokenStore, @unchecked Sendable {
     private var _credential: BOCredential?
     private let _headerField: String
     private let _headerValueBuilder: (String) -> String
+    private var credentialObserver: ((BOCredential?) -> Void)?
 
     /// - Parameters:
     ///   - credential: 初始凭证，默认 nil。
@@ -89,13 +101,21 @@ public final class BOInMemoryTokenStore: BOTokenStore, @unchecked Sendable {
 
     public var credential: BOCredential? {
         get { queue.sync { _credential } }
-        set { queue.async(flags: .barrier) { self._credential = newValue } }
+        set {
+            queue.sync(flags: .barrier) { self._credential = newValue }
+            // 通知观察者（在栅栏写之外调用，避免持写锁期间执行外部回调）。
+            credentialObserver?(newValue)
+        }
     }
 
     public var headerField: String { _headerField }
 
     public func headerValue(for accessToken: String) -> String {
         _headerValueBuilder(accessToken)
+    }
+
+    public func setCredentialObserver(_ observer: ((BOCredential?) -> Void)?) {
+        queue.sync(flags: .barrier) { self.credentialObserver = observer }
     }
 }
 

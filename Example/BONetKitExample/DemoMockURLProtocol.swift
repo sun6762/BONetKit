@@ -83,6 +83,28 @@ final class DemoMockURLProtocol: URLProtocol {
             return
         }
 
+        // 登录加解密闭环：校验编码后的请求体已包含被请求中间件处理过的 password，
+        // 然后返回 Base64 编码的完整业务响应，由响应中间件在解析前解开。
+        if path.contains("login") {
+            let body = Self.bodyData(from: request).flatMap {
+                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+            }
+            guard request.value(forHTTPHeaderField: "X-Demo-Request-Encrypted") == "1",
+                  body?["password"] as? String == Data("123456".utf8).base64EncodedString() else {
+                respond(statusCode: 400, json: #"{ "code": 1002, "message": "password 未在编码前处理", "data": null }"#)
+                return
+            }
+
+            let plainResponse = #"{ "code": 0, "message": "ok", "data": { "token": "mock-token-abc123" } }"#
+            let encryptedResponse = Data(plainResponse.utf8).base64EncodedString()
+            respond(
+                statusCode: 200,
+                json: encryptedResponse,
+                headers: ["X-Demo-Response-Encrypted": "1"]
+            )
+            return
+        }
+
         // 业务码失效演示：/secure-bizfail 返回 HTTP 200，但旧 token 时业务码为 40101（失效）。
         // 用于演示「HTTP 200 + 业务码失效」如何复用 401 的刷新重发机制。
         if path.contains("bizfail") {
@@ -122,14 +144,34 @@ final class DemoMockURLProtocol: URLProtocol {
     /// 刷新后的新 access token 标识。带此 token 的 /secure 请求视为通过。
     static let freshAccessToken = "fresh-access-token"
 
+    /// URLSession 交给 URLProtocol 时，请求体可能位于 httpBody 或 httpBodyStream。
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count >= 0 else { return nil }
+            if count == 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
     /// 统一构造并回发响应。
-    private func respond(statusCode: Int, json: String) {
+    private func respond(statusCode: Int, json: String, headers: [String: String] = [:]) {
         let data = Data(json.utf8)
+        var responseHeaders = ["Content-Type": "application/json"]
+        responseHeaders.merge(headers) { _, new in new }
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: "https://mock.local")!,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: responseHeaders
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -150,17 +192,6 @@ final class DemoMockURLProtocol: URLProtocol {
     /// - `/feed`：`items` 故意返回单个对象（而非数组），演示 BOObjectOrArray 归一。
     /// - 其他：返回一条成功的 post 数据。
     private static func mockJSON(for path: String) -> String {
-        if path.contains("login") {
-            return #"""
-            {
-              "code": 0,
-              "message": "ok",
-              "data": {
-                "token": "mock-token-abc123"
-              }
-            }
-            """#
-        }
         if path.contains("flexible") {
             // age 故意用字符串 "25"，score 用数字 98.5，演示类型漂移被归一。
             return #"""

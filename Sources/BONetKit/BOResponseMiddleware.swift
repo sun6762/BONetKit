@@ -97,11 +97,22 @@ enum BOResponseMiddlewareChain {
 /// 仅用于调试。它不改写上下文，调用 `next` 后打印结果。
 public struct BOLoggingMiddleware: BOResponseMiddleware {
 
-    /// 是否打印响应体内容（可能较大）。默认 true。
+    /// 是否打印响应体内容（可能较大，且可能含敏感信息）。
     public let logsBody: Bool
 
-    public init(logsBody: Bool = true) {
-        self.logsBody = logsBody
+    /// - Parameter logsBody: 是否打印响应体。默认值随构建配置而定：
+    ///   **DEBUG 默认 true，Release 默认 false**——避免生产环境把响应体（可能含
+    ///   token / 手机号等敏感数据）写入系统日志（LOG-01）。显式传值可覆盖默认。
+    public init(logsBody: Bool? = nil) {
+        if let logsBody {
+            self.logsBody = logsBody
+        } else {
+            #if DEBUG
+            self.logsBody = true
+            #else
+            self.logsBody = false
+            #endif
+        }
     }
 
     public func process(

@@ -45,9 +45,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 commonHeaders: ["Accept": "application/json"],
                 maxRetryCount: 1,
                 protocolClasses: [DemoMockURLProtocol.self],
+                // 编码前请求中间件：登录请求中的 password 会先做字段级转换，再交给 Alamofire 编码。
+                requestMiddlewares: [
+                    DemoFieldEncryptionRequestMiddleware(fields: ["password"])
+                ],
                 additionalInterceptors: [DemoLoggingInterceptor()],   // 用户自定义请求拦截器
                 // 响应中间件链：日志 + 错误上报。
                 responseMiddlewares: [
+                    DemoEncryptedResponseMiddleware(),                // Mock 加密响应先解密，再交给解析器
                     BOLoggingMiddleware(),                       // 内置：日志
                     DemoSlowRequestMiddleware(threshold: 1.0),   // 自定义：慢请求告警
                     BOErrorReportingMiddleware { context in      // 内置：错误上报

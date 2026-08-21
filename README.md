@@ -96,16 +96,24 @@ BONetClient.shared.configure(
 )
 ```
 
-凭证用 `BOCredential`（双 token；单 token 场景 `refreshToken` / `expiration` 可省略）：
+凭证用 `BOCredential`（双 token；单 token 场景 `refreshToken` / `expiration` 可省略）。
+登录 / 退出登录通过客户端方法更新凭证，**无需重新 `configure`**：
 
 ```swift
-// 登录成功后写入，后续请求自动带上鉴权头，无需重新 configure：
-tokenStore.credential = BOCredential(
-    accessToken: "xxx",
-    refreshToken: "yyy",
-    expiration: Date(timeIntervalSinceNow: 3600)
+// 登录成功后：库内同步更新 tokenStore 与认证拦截器，后续请求即自动携带新凭证。
+BONetClient.shared.updateCredential(
+    BOCredential(accessToken: "xxx", refreshToken: "yyy",
+                 expiration: Date(timeIntervalSinceNow: 3600))
 )
+
+// 退出登录：清空凭证，之后请求不再携带鉴权头。
+BONetClient.shared.clearCredential()
 ```
+
+> 推荐用 `updateCredential(_:)` / `clearCredential()` 更新凭证。
+> 直接写 `tokenStore.credential` 也可以——内置 `BOInMemoryTokenStore` 会通过变化回调
+> 自动同步给认证拦截器；但**自定义的 `BOTokenStore` 若未实现 `setCredentialObserver`，
+> 直接写不会自动同步，应改用 `updateCredential(_:)`**。
 
 ### 自动刷新（基于 401）
 
@@ -162,19 +170,19 @@ BONetConfiguration(
 
 ## 请求取消
 
-`request(...)` 返回一个 `BORequestToken?` 句柄（`@discardableResult`，不接收返回值也可）。
+`request(...)` 返回一个 `BORequestTicket?` 票据（`@discardableResult`，不接收返回值也可）。
 请求被取消时，回调返回 `BONetError.cancelled`（可用 `error.isCancelled` 判断），通常无需提示为错误。
 
 ### 手动取消
 
-持有句柄，在需要时取消（如页面退出、搜索词变化）：
+持有票据，在需要时取消（如页面退出、搜索词变化）：
 
 ```swift
-let token = BONetClient.shared.request("/user", of: User.self) { result in
+let ticket = BONetClient.shared.request("/user", of: User.self) { result in
     if case .failure(let error) = result, error.isCancelled { return }
     // ...
 }
-token?.cancel()
+ticket?.cancel()
 ```
 
 ### 分组取消
@@ -191,18 +199,50 @@ BONetClient.shared.cancelAll()                 // 取消所有进行中请求
 
 ### 自动去重
 
-开启 `deduplicate` 后，发起时若已有「相同请求」进行中，会**取消旧的、用新的**
-（适合搜索框输入、防重复提交等场景）。相同的判定依据是 `method + URL + 参数`
-（参数不同则视为不同请求）：
+通过 `deduplication` 参数（`BODeduplicationPolicy`）控制：发起时若已有「相同请求」进行中，
+按策略处理。相同的判定依据是 `method + URL + 参数`（参数不同则视为不同请求）：
 
 ```swift
 BONetClient.shared.request(
-    "/search", parameters: ["q": keyword], of: Result.self,
-    deduplicate: true
+    "/search", parameters: ["q": keyword], of: SearchResult.self,
+    deduplication: .cancelPrevious
 ) { ... }
 ```
 
-被去重取消的旧请求，其回调返回 `.cancelled`。默认关闭，逐请求控制。
+三种策略：
+
+| 策略 | 行为 | 适用场景 |
+|------|------|---------|
+| `.none`（默认） | 不去重 | 普通请求 |
+| `.cancelPrevious` | 取消进行中的旧请求，发起新的 | 搜索框输入、筛选（新的作废旧的） |
+| `.discardNew` | 已有相同请求在跑则丢弃新的，不发起 | 防重复提交（狂点按钮） |
+
+被取消（`.cancelPrevious`）或被丢弃（`.discardNew`）的请求，其回调返回 `.cancelled`。默认 `.none`，逐请求控制。
+
+相同请求的判定默认基于 `method + URL + 规范化参数`（嵌套字典键会递归排序，参数顺序不影响判定）。
+复杂参数或自定义编码场景，可显式传 `deduplicationKey` 指定去重键：
+
+```swift
+BONetClient.shared.request(
+    "/search", parameters: complexParams, of: SearchResult.self,
+    deduplication: .cancelPrevious,
+    deduplicationKey: "search-\(keyword)"   // 优先于自动指纹
+) { ... }
+```
+
+## 请求重试
+
+失败重试由 `maxRetryCount` 控制，仅对**瞬时网络错误**（超时、连接中断等）重试，采用指数退避 + 随机抖动。
+
+安全约束：默认只对**幂等方法**（GET/HEAD/PUT/DELETE/OPTIONS/TRACE）自动重试；
+**POST/PATCH 默认不重试**，避免连接结果不明时重复下单/支付/提交。若某个非幂等请求确认可安全重试：
+
+```swift
+BONetClient.shared.request(
+    "/submit", method: .post, parameters: params, of: Ack.self,
+    allowsRetryOnNonIdempotent: true   // 显式允许该 POST 重试
+) { ... }
+```
 
 ## 错误处理
 
@@ -236,6 +276,49 @@ BOErrorDispatcher.shared.fallbackHandler = { error in
 > 「请求时显式传入 handler」与「全局兜底」两种方式。
 
 ## 自定义请求拦截器
+
+### 编码前请求中间件
+
+`requestMiddlewares` 在 Alamofire 编码参数之前运行，拿到的是结构化请求上下文，
+因此可以对单个字段进行加密、增加签名参数、统一业务参数或埋点信息：
+
+```swift
+struct PasswordEncryptionMiddleware: BORequestMiddleware {
+    func process(_ context: BORequestContext) -> BORequestContext {
+        var result = context
+        if let password = result.parameters?["password"] as? String {
+            result.parameters?["password"] = encrypt(password)
+        }
+        result.headers["X-Signed"] = "1"
+        return result
+    }
+}
+
+BONetClient.shared.configure(
+    BONetConfiguration(
+        baseURL: "https://api.example.com",
+        requestMiddlewares: [
+            PasswordEncryptionMiddleware(),
+            RequestSignatureMiddleware()
+        ]
+    )
+)
+```
+
+多个请求中间件按数组顺序同步执行，上一个中间件的输出会成为下一个的输入。
+中间件可以修改 `path`、`method`、`parameters` 和 `headers`；`group` 与
+`deduplication` 作为只读元信息提供。处理后的请求才会参与 URL 解析、去重和参数编码。
+
+请求中间件和 Alamofire 请求拦截器并不重复，它们处理的是不同阶段：
+
+| 层 | 处理时机 | 可处理的数据 |
+|---|---|---|
+| `BORequestMiddleware` | Alamofire 编码前 | 结构化 path、method、parameters、headers |
+| `RequestInterceptor.adapt` | Alamofire 编码后 | 已序列化的 `URLRequest` |
+
+完整顺序为：请求中间件加工结构化参数 → Alamofire 编码 → 请求拦截器注入 Token 和公共头 → 发出请求。
+
+### 编码后请求拦截器
 
 除了库内置的拦截器（注入公共头 / token、失败重试），你可以传入自己的
 Alamofire `RequestInterceptor`，在库内与内置拦截器组合成一条链统一执行。
@@ -403,7 +486,14 @@ struct User: Decodable {
 // 取值：user.age（直接是 Int）
 ```
 
-支持 Int / Double / String / Bool 互转；字段可能缺失时声明为可选：`@BOFlexible var age: Int?`。
+支持 Int / Double / String / Bool 互转。字段**可能缺失或为 null** 时，改用 `@BOFlexibleOptional`：
+
+```swift
+struct User: Decodable {
+    @BOFlexible var age: Int              // 必有值；无效非空值会报错
+    @BOFlexibleOptional var score: Int?   // 缺失/null → nil；"25"/25.0 → 25
+}
+```
 
 ### 对象 / 数组漂移（备用）
 

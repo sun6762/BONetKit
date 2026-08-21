@@ -64,6 +64,12 @@ public struct BONetConfiguration {
     /// 主要用于测试或本地 mock：拦截请求并返回构造好的响应。生产环境通常留空。
     public var protocolClasses: [AnyClass]
 
+    /// 编码前请求中间件链。
+    ///
+    /// 按数组顺序同步执行，每个中间件都可读取和修改结构化的 path、method、parameters
+    /// 与 headers。适合字段级加密、签名、公共业务参数和埋点参数等编码前处理。
+    public var requestMiddlewares: [BORequestMiddleware]
+
     /// 用户自定义请求拦截器。
     ///  
     /// 会与库内置拦截器组合成一条链，统一由底层会话执行：
@@ -108,6 +114,7 @@ public struct BONetConfiguration {
         commonHeaders: [String: String] = [:],
         maxRetryCount: Int = 0,
         protocolClasses: [AnyClass] = [],
+        requestMiddlewares: [BORequestMiddleware] = [],
         additionalInterceptors: [RequestInterceptor] = [],
         keyDecodingStrategy: JSONDecoder.KeyDecodingStrategy = .useDefaultKeys,
         responseMiddlewares: [BOResponseMiddleware] = [],
@@ -121,6 +128,7 @@ public struct BONetConfiguration {
         self.commonHeaders = commonHeaders
         self.maxRetryCount = maxRetryCount
         self.protocolClasses = protocolClasses
+        self.requestMiddlewares = requestMiddlewares
         self.additionalInterceptors = additionalInterceptors
         self.keyDecodingStrategy = keyDecodingStrategy
         self.responseMiddlewares = responseMiddlewares

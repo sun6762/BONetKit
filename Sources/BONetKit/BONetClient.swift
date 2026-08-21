@@ -20,22 +20,54 @@ public final class BONetClient {
     /// 全局共享客户端。
     public static let shared = BONetClient()
 
-    /// 当前配置；调用 `configure(_:)` 后生效。
-    private var configuration: BONetConfiguration?
+    /// 当前生效的运行时快照（配置 + session + 认证拦截器 + 解码器）。
+    /// 由 `configure(_:)` 原子替换，`request(...)` 原子读取。受 `stateLock` 保护。
+    private var runtime: BONetRuntime?
 
-    /// 底层 Alamofire 会话，随配置一同创建。
-    private var session: Session?
+    /// 保护 `runtime` 读写的锁，避免 configure 与 request 并发时的数据竞争。
+    private let stateLock = NSLock()
 
-    /// 用于解码后端响应的解码器。其键名转换策略在 `configure(_:)` 时按配置设定。
-    private let decoder = JSONDecoder()
+    /// 线程安全读取当前运行时快照。
+    private var currentRuntime: BONetRuntime? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return runtime
+    }
 
     /// 进行中请求的注册表：id → 句柄。用串行队列保护，保证线程安全。
     private var activeTickets: [UUID: BORequestTicket] = [:]
+    /// 去重预留的指纹集合：覆盖「去重决策」到「注册票据」之间的并发窗口，
+    /// 保证 discardNew/cancelPrevious 的检查与占位在同一临界区内原子完成（DEDUP-02）。
+    private var reservedFingerprints: Set<String> = []
     private let ticketsQueue = DispatchQueue(label: "com.bonetkit.activetickets")
 
     // MARK: - Init
 
     private init() {}
+}
+
+/// 一次配置生效后的不可变运行时快照。
+///
+/// `configure(_:)` 构建一份新快照并原子替换；`request(...)` 发起时捕获当前快照，
+/// 整个请求生命周期（含响应回调）都使用这份快照，不再回读可变的 `self.configuration`。
+/// 这样运行中重新配置不会影响进行中的请求（STATE-01）。
+private final class BONetRuntime {
+    let configuration: BONetConfiguration
+    let session: Session
+    let authInterceptor: AuthenticationInterceptor<BOAuthenticator>?
+    /// 本快照独占的解码器（不与其他请求共享，避免并发解码竞争）。
+    let decoder: JSONDecoder
+
+    init(
+        configuration: BONetConfiguration,
+        session: Session,
+        authInterceptor: AuthenticationInterceptor<BOAuthenticator>?,
+        decoder: JSONDecoder
+    ) {
+        self.configuration = configuration
+        self.session = session
+        self.authInterceptor = authInterceptor
+        self.decoder = decoder
+    }
 }
 
 // MARK: - Public Methods
@@ -45,11 +77,6 @@ public extension BONetClient {
     /// 使用给定配置初始化客户端。通常在 App 启动时调用一次。
     /// - Parameter configuration: 网络配置。
     func configure(_ configuration: BONetConfiguration) {
-        self.configuration = configuration
-
-        // 应用响应解码的键名转换策略（如 snake_case 转 camelCase）。
-        decoder.keyDecodingStrategy = configuration.keyDecodingStrategy
-
         let sessionConfiguration = URLSessionConfiguration.af.default
         sessionConfiguration.timeoutIntervalForRequest = configuration.timeoutInterval
 
@@ -59,7 +86,26 @@ public extension BONetClient {
             sessionConfiguration.protocolClasses = configuration.protocolClasses + existing
         }
 
-        self.session = makeSession(configuration: configuration, sessionConfiguration: sessionConfiguration)
+        // 本快照独占的解码器，应用键名策略。
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = configuration.keyDecodingStrategy
+
+        let (session, authInterceptor) = makeSession(
+            configuration: configuration,
+            sessionConfiguration: sessionConfiguration
+        )
+
+        let newRuntime = BONetRuntime(
+            configuration: configuration,
+            session: session,
+            authInterceptor: authInterceptor,
+            decoder: decoder
+        )
+
+        // 原子替换当前运行时快照。
+        stateLock.lock()
+        self.runtime = newRuntime
+        stateLock.unlock()
     }
 
     /// 发起请求并将响应解码为指定模型。
@@ -72,7 +118,10 @@ public extension BONetClient {
     ///   - headers: 本次请求附加的请求头。
     ///   - type: 目标模型类型，对应后端 `data` 字段。
     ///   - group: 分组标识，用于按组批量取消。
-    ///   - deduplicate: 开启后，若已有相同请求进行中，取消旧的用新的。
+    ///   - deduplication: 去重策略，默认 `.none`。
+    ///   - deduplicationKey: 自定义去重键，优先于自动指纹。适合复杂参数或自定义编码场景。
+    ///   - allowsRetryOnNonIdempotent: 允许本次非幂等请求（POST/PATCH）在瞬时网络错误时重试。
+    ///     默认 false——非幂等请求默认不重试以避免重复副作用。仅在确认该接口可安全重试时开启。
     ///   - errorHandler: 本次请求的错误处理者，失败时经错误分发中心路由。
     ///   - completion: 结果回调，成功携带解码后的模型，失败携带 `BONetError`。
     /// - Returns: 请求句柄，可用于取消；未配置时返回 nil。
@@ -86,39 +135,67 @@ public extension BONetClient {
         of type: T.Type,
         group: String? = nil,
         deduplication: BODeduplicationPolicy = .none,
+        deduplicationKey: String? = nil,
+        allowsRetryOnNonIdempotent: Bool = false,
         errorHandler: BOErrorHandlerProtocol? = nil,
         completion: @escaping (Result<T, BONetError>) -> Void
     ) -> BORequestTicket? {
-        guard let session, let configuration else {
+        // 捕获当前运行时快照：本请求全程（含响应回调）使用它，不再回读可变状态。
+        guard let runtime = currentRuntime else {
             deliver(.failure(.unknown(underlying: nil)), to: errorHandler, completion: completion)
             return nil
         }
+        let configuration = runtime.configuration
 
-        let url = Self.resolveURL(path: path, baseURL: configuration.baseURL)
+        // 编码前按顺序执行请求中间件。后续 URL 解析、去重和参数编码全部使用处理结果。
+        let requestContext = BORequestMiddlewareChain.run(
+            configuration.requestMiddlewares,
+            context: BORequestContext(
+                path: path,
+                method: method,
+                parameters: parameters,
+                headers: headers ?? [:],
+                group: group,
+                deduplication: deduplication
+            )
+        )
+        let resolvedPath = requestContext.path
+        let resolvedMethod = requestContext.method
+        let resolvedParameters = requestContext.parameters
+        let url = Self.resolveURL(path: resolvedPath, baseURL: configuration.baseURL)
 
-        // 去重处理：按策略决定是否发起新请求。
+        // 去重处理：在单个临界区内原子完成「检查 + 决策 + 预留」（DEDUP-02），
+        // 避免两个相同请求的检查与注册交错导致都被放行。
         var fingerprint: String?
         if deduplication != .none {
-            let fp = Self.fingerprint(method: method, url: url, parameters: parameters)
+            // 调用方显式提供 deduplicationKey 时优先用它（应对复杂参数 / 自定义编码）；
+            // 否则用 method + URL + 规范化参数自动计算。
+            let fp = deduplicationKey ?? Self.fingerprint(
+                method: resolvedMethod,
+                url: url,
+                parameters: resolvedParameters
+            )
             fingerprint = fp
-            switch deduplication {
-            case .cancelPrevious:
-                // 取消同指纹进行中的旧请求，随后照常发起新请求。
-                cancelExistingRequests(fingerprint: fp)
-            case .discardNew:
-                // 已有相同请求进行中则丢弃本次：不发起，回调 .cancelled。
-                if hasExistingRequest(fingerprint: fp) {
-                    deliver(.failure(.cancelled), to: errorHandler, completion: completion)
-                    return nil
-                }
-            case .none:
-                break
+            let decision = reserveFingerprint(fp, policy: deduplication)
+            // discardNew 且已有相同请求在跑 → 丢弃本次。
+            guard decision.shouldProceed else {
+                deliver(.failure(.cancelled), to: errorHandler, completion: completion)
+                return nil
             }
+            // cancelPrevious → 在临界区外取消收集到的旧请求。
+            decision.ticketsToCancel.forEach { $0.cancel() }
+        }
+
+        // 请求级重试覆盖：通过内部请求头把「允许非幂等重试」传递给拦截器。
+        var finalHeaders = requestContext.headers
+        if allowsRetryOnNonIdempotent {
+            finalHeaders[BORequestInterceptor.allowRetryHeader] = "1"
         }
 
         let request = makeRequest(
-            session: session, url: url, method: method,
-            parameters: parameters, encoding: encoding, headers: headers,
+            session: runtime.session, url: url, method: resolvedMethod,
+            parameters: resolvedParameters, encoding: encoding,
+            headers: finalHeaders.isEmpty ? nil : finalHeaders,
             expiredCodes: configuration.tokenExpiredBusinessCodes
         )
 
@@ -127,11 +204,32 @@ public extension BONetClient {
         registerTicket(ticket)
 
         request.responseData { [weak self] response in
-            self?.handleResponse(response, ticket: ticket, as: T.self,
+            // 用发起时捕获的 runtime 快照处理响应，不回读 self.runtime。
+            self?.handleResponse(response, ticket: ticket, runtime: runtime, as: T.self,
                                  errorHandler: errorHandler, completion: completion)
         }
 
         return ticket
+    }
+
+    /// 更新鉴权凭证（登录成功、手动刷新后调用）。
+    ///
+    /// 库内同步更新两处：`tokenStore` 与认证拦截器内部凭证——因此无需重新 `configure`，
+    /// 后续请求即可携带新凭证并正常进入自动刷新流程。
+    /// - Parameter credential: 新凭证。
+    func updateCredential(_ credential: BOCredential) {
+        let rt = currentRuntime
+        rt?.configuration.tokenStore?.credential = credential
+        rt?.authInterceptor?.credential = credential
+    }
+
+    /// 清除鉴权凭证（退出登录时调用）。
+    ///
+    /// 同步清空 `tokenStore` 与认证拦截器内部凭证，之后的请求不再携带鉴权头。
+    func clearCredential() {
+        let rt = currentRuntime
+        rt?.configuration.tokenStore?.credential = nil
+        rt?.authInterceptor?.credential = nil
     }
 
     /// 取消指定分组的所有进行中请求。
@@ -159,23 +257,37 @@ private extension BONetClient {
     func makeSession(
         configuration: BONetConfiguration,
         sessionConfiguration: URLSessionConfiguration
-    ) -> Session {
+    ) -> (session: Session, authInterceptor: AuthenticationInterceptor<BOAuthenticator>?) {
         let builtInInterceptor = BORequestInterceptor(configuration: configuration)
         var interceptors: [RequestInterceptor] = [builtInInterceptor]
+        var authInterceptor: AuthenticationInterceptor<BOAuthenticator>?
 
+        // 只要配置了 tokenStore + tokenRefresh 就建立认证拦截器（不依赖启动时是否已有凭证）。
+        // 初始凭证取 store 当前值（可能为 nil，合法）；登录后经 updateCredential(_:) 同步。
         if let tokenStore = configuration.tokenStore,
-           let tokenRefresh = configuration.tokenRefresh,
-           let credential = tokenStore.credential {
+           let tokenRefresh = configuration.tokenRefresh {
             let authenticator = BOAuthenticator(store: tokenStore, refreshHandler: tokenRefresh)
-            interceptors.append(AuthenticationInterceptor(authenticator: authenticator, credential: credential))
+            let interceptor = AuthenticationInterceptor(
+                authenticator: authenticator,
+                credential: tokenStore.credential
+            )
+            authInterceptor = interceptor
+            interceptors.append(interceptor)
+
+            // 兜底：订阅 store 凭证变化，自动同步给认证拦截器。
+            // 这样即便调用方绕过 updateCredential(_:) 直接写 store，两份凭证也保持一致。
+            tokenStore.setCredentialObserver { [weak interceptor] newCredential in
+                interceptor?.credential = newCredential
+            }
         }
 
         interceptors.append(contentsOf: configuration.additionalInterceptors)
 
-        return Session(
+        let session = Session(
             configuration: sessionConfiguration,
             interceptor: Interceptor(interceptors: interceptors)
         )
+        return (session, authInterceptor)
     }
 
     /// 创建带校验的 Alamofire 请求。配置了业务失效码时追加自定义校验。
@@ -217,6 +329,7 @@ private extension BONetClient {
     func handleResponse<T: Decodable>(
         _ response: AFDataResponse<Data>,
         ticket: BORequestTicket,
+        runtime: BONetRuntime,
         as type: T.Type,
         errorHandler: BOErrorHandlerProtocol?,
         completion: @escaping (Result<T, BONetError>) -> Void
@@ -238,36 +351,54 @@ private extension BONetClient {
             duration: response.metrics?.taskInterval.duration
         )
 
+        // 以下全部使用发起时捕获的 runtime 快照，不回读 self，保证请求用发起时的配置处理。
         // 响应中间件链（日志、上报、改写、短路等横切逻辑）。
-        let middlewares = configuration?.responseMiddlewares ?? []
+        let middlewares = runtime.configuration.responseMiddlewares
         if !middlewares.isEmpty {
             context = BOResponseMiddlewareChain.run(middlewares, context: context)
         }
 
-        // 链后统一解析为业务模型。使用配置的解析器；缺失时兜底为默认解析器。
-        let parser = configuration?.responseParser ?? BODefaultResponseParser()
-        let result = parser.parse(context, as: T.self, decoder: decoder)
+        // 链后统一解析为业务模型，使用快照的解析器与解码器。
+        let parser = runtime.configuration.responseParser
+        let result = parser.parse(context, as: T.self, decoder: runtime.decoder)
         deliver(result, to: errorHandler, completion: completion)
     }
 
-    /// 是否存在同指纹的进行中请求（去重 discardNew 策略用）。
-    func hasExistingRequest(fingerprint: String) -> Bool {
+    /// 去重决策 + 预留（在单个临界区内原子完成，DEDUP-02）。
+    /// - Returns: `shouldProceed` 是否应发起新请求；`ticketsToCancel` 需在锁外取消的旧请求。
+    func reserveFingerprint(
+        _ fingerprint: String,
+        policy: BODeduplicationPolicy
+    ) -> (shouldProceed: Bool, ticketsToCancel: [BORequestTicket]) {
         ticketsQueue.sync {
-            activeTickets.values.contains { $0.fingerprint == fingerprint }
+            // 「进行中」= 已注册的活动请求 或 已预留但尚未注册的指纹。
+            let activeMatches = activeTickets.values.filter { $0.fingerprint == fingerprint }
+            let existsInflight = !activeMatches.isEmpty || reservedFingerprints.contains(fingerprint)
+
+            switch policy {
+            case .discardNew:
+                if existsInflight {
+                    return (false, [])   // 已有相同请求，丢弃本次
+                }
+                reservedFingerprints.insert(fingerprint)   // 预留占位
+                return (true, [])
+            case .cancelPrevious:
+                reservedFingerprints.insert(fingerprint)
+                return (true, Array(activeMatches))         // 旧请求待锁外取消
+            case .none:
+                return (true, [])
+            }
         }
     }
 
-    /// 取消与给定指纹相同的进行中请求（去重 cancelPrevious 策略用）。
-    func cancelExistingRequests(fingerprint: String) {
-        let targets = ticketsQueue.sync {
-            activeTickets.values.filter { $0.fingerprint == fingerprint }
-        }
-        targets.forEach { $0.cancel() }
-    }
-
-    /// 登记进行中请求。
+    /// 登记进行中请求，并清除其指纹的预留占位（若有）。
     func registerTicket(_ ticket: BORequestTicket) {
-        ticketsQueue.sync { activeTickets[ticket.id] = ticket }
+        ticketsQueue.sync {
+            activeTickets[ticket.id] = ticket
+            if let fp = ticket.fingerprint {
+                reservedFingerprints.remove(fp)
+            }
+        }
     }
 
     /// 从注册表移除请求。
@@ -289,20 +420,6 @@ private extension BONetClient {
         }
     }
 
-    /// 计算请求去重指纹：method + 完整 URL + 参数。
-    static func fingerprint(
-        method: HTTPMethod,
-        url: String,
-        parameters: [String: Any]?
-    ) -> String {
-        var parts = [method.rawValue, url]
-        if let parameters, !parameters.isEmpty {
-            let sorted = parameters.sorted { $0.key < $1.key }
-            parts.append(sorted.map { "\($0.key)=\($0.value)" }.joined(separator: "&"))
-        }
-        return parts.joined(separator: "|")
-    }
-
     /// 拼接最终请求 URL：`path` 为完整 URL 时直接使用，否则与 `baseURL` 拼接。
     static func resolveURL(path: String, baseURL: String) -> String {
         if path.hasPrefix("http://") || path.hasPrefix("https://") {
@@ -316,5 +433,38 @@ private extension BONetClient {
     /// 按 HTTP 方法选择默认参数编码：GET 用 URL 编码，其余用 JSON。
     static func defaultEncoding(for method: HTTPMethod) -> ParameterEncoding {
         method == .get ? URLEncoding.default : JSONEncoding.default
+    }
+}
+
+// MARK: - Internal (供测试)
+
+extension BONetClient {
+
+    /// 计算请求去重指纹：method + 完整 URL + 规范化后的参数。
+    ///
+    /// 参数用 `JSONSerialization` 的 `.sortedKeys` 规范化——**嵌套字典的键也会递归排序**，
+    /// 因此参数插入顺序不影响指纹（DEDUP-01）。无法序列化时回退到排序键值对拼接。
+    static func fingerprint(
+        method: HTTPMethod,
+        url: String,
+        parameters: [String: Any]?
+    ) -> String {
+        var parts = [method.rawValue, url]
+        if let parameters, !parameters.isEmpty {
+            parts.append(normalizedParameters(parameters))
+        }
+        return parts.joined(separator: "|")
+    }
+
+    /// 把参数规范化为稳定字符串：优先用 sortedKeys 的 JSON；失败则回退。
+    static func normalizedParameters(_ parameters: [String: Any]) -> String {
+        if JSONSerialization.isValidJSONObject(parameters),
+           let data = try? JSONSerialization.data(withJSONObject: parameters, options: [.sortedKeys]),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+        return parameters.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "&")
     }
 }

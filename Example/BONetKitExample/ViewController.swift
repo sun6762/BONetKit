@@ -161,13 +161,13 @@ final class ViewController: UIViewController {
         ) { [weak self] result in
             switch result {
             case .success(let login):
-                // 关键：登录成功仅需把新凭证写入单一来源 tokenStore，
-                // 无需重新 configure；后续请求会自动从 store 读取并注入。
-                AppEnvironment.tokenStore.credential = BOCredential(
+                // 关键：登录成功调用 updateCredential，库内同步更新 tokenStore 与认证拦截器，
+                // 无需重新 configure；后续请求即可携带新凭证并进入自动刷新流程。
+                BONetClient.shared.updateCredential(BOCredential(
                     accessToken: login.token,
                     refreshToken: "refresh-token",
                     expiration: Date(timeIntervalSinceNow: 3600)
-                )
+                ))
                 self?.resultTextView.text = """
                 ✅ 登录成功，凭证已写入 tokenStore
                 token: \(login.token)

@@ -15,11 +15,29 @@ final class TestMockURLProtocol: URLProtocol {
     static var routes: [String: (Int, String)] = [:]
     /// 延迟返回的 path 关键字（用于取消测试）。
     static var slowPaths: Set<String> = []
+    static var requestObserver: ((URLRequest) -> Void)?
+
+    static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count >= 0 else { return nil }
+            if count == 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.requestObserver?(request)
         let path = request.url?.path ?? ""
 
         if Self.slowPaths.contains(where: { path.contains($0) }) {
@@ -51,6 +69,7 @@ final class BONetClientIntegrationTests: XCTestCase {
         super.setUp()
         TestMockURLProtocol.routes = [:]
         TestMockURLProtocol.slowPaths = []
+        TestMockURLProtocol.requestObserver = nil
         BONetClient.shared.configure(
             BONetConfiguration(
                 baseURL: "https://test.local",
@@ -108,5 +127,47 @@ final class BONetClientIntegrationTests: XCTestCase {
             if case .success = result { secondExp.fulfill() }
         }
         wait(for: [firstExp, secondExp], timeout: 5)
+    }
+
+    func testRequestMiddlewareRunsBeforeParameterEncoding() {
+        struct EncryptPasswordMiddleware: BORequestMiddleware {
+            func process(_ context: BORequestContext) -> BORequestContext {
+                var result = context
+                result.parameters?["password"] = "encrypted-value"
+                result.headers["X-Processed"] = "1"
+                return result
+            }
+        }
+
+        TestMockURLProtocol.routes["login"] = (200, #"{ "code": 0, "message": "ok", "data": { "id": 1 } }"#)
+        let observed = expectation(description: "encoded request observed")
+        TestMockURLProtocol.requestObserver = { request in
+            let object = TestMockURLProtocol.bodyData(from: request).flatMap {
+                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+            }
+            XCTAssertEqual(object?["password"] as? String, "encrypted-value")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Processed"), "1")
+            observed.fulfill()
+        }
+        BONetClient.shared.configure(
+            BONetConfiguration(
+                baseURL: "https://test.local",
+                protocolClasses: [TestMockURLProtocol.self],
+                requestMiddlewares: [EncryptPasswordMiddleware()]
+            )
+        )
+
+        let completed = expectation(description: "request completed")
+        BONetClient.shared.request(
+            "/login",
+            method: .post,
+            parameters: ["password": "plain-value"],
+            of: P.self
+        ) { result in
+            XCTAssertEqual(try? result.get(), P(id: 1))
+            completed.fulfill()
+        }
+
+        wait(for: [observed, completed], timeout: 5)
     }
 }

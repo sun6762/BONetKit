@@ -28,12 +28,23 @@ public protocol BOResponseParser {
     ) -> Result<T, BONetError>
 }
 
-/// 默认解析器：按后端统一结构 `{ code, message, data }` 解析，`code == 0` 视为成功。
+/// 默认解析器：按后端统一结构 `{ code, message, data }` 解析。
 ///
-/// 处理顺序：网络错误 → HTTP 状态码错误 → 空数据 → 解码统一结构 → 校验业务码 → 取 `data`。
+/// 处理顺序（关键：先判业务码，再按需解码 `data`）：
+/// 网络错误 → HTTP 状态码错误 → 空数据 → **解外层读 code/message/原始 data**
+/// → 业务失败则直接返回 `.business`（不依赖成功模型 T）
+/// → 业务成功才把原始 `data` 解码为 `T`。
+///
+/// 这样可避免「失败响应的 data 与成功模型 T 不匹配时，业务错误被误报为解码错误」。
 public struct BODefaultResponseParser: BOResponseParser {
 
-    public init() {}
+    /// 判定业务成功的规则，默认 `code == 0`。可自定义以适配不同后端。
+    private let isSuccessCode: (Int) -> Bool
+
+    /// - Parameter isSuccessCode: 给定业务码返回是否成功，默认 `$0 == 0`。
+    public init(isSuccessCode: @escaping (Int) -> Bool = { $0 == 0 }) {
+        self.isSuccessCode = isSuccessCode
+    }
 
     public func parse<T: Decodable>(
         _ context: BOResponseContext,
@@ -59,17 +70,45 @@ public struct BODefaultResponseParser: BOResponseParser {
             return .failure(.emptyData)
         }
 
+        // 第一步：只解外层，读 code / message / 原始 data（不涉及成功模型 T）。
+        let envelope: [String: Any]
         do {
-            let wrapper = try decoder.decode(BONetResponse<T>.self, from: data)
-            guard wrapper.isSuccess else {
-                return .failure(.makeBusiness(code: wrapper.code, message: wrapper.message))
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return .failure(.decoding(underlying: BOParseError.notObject))
             }
-            guard let payload = wrapper.data else {
-                return .failure(.emptyData)
-            }
+            envelope = obj
+        } catch {
+            return .failure(.decoding(underlying: error))
+        }
+
+        let code = (envelope["code"] as? Int) ?? -1
+        let message = (envelope["message"] as? String) ?? ""
+
+        // 第二步：先判业务码。失败直接返回 .business，并把 data 内容作为附加信息保留，
+        // 完全不依赖成功模型 T。
+        guard isSuccessCode(code) else {
+            let userInfo = (envelope["data"] as? [String: Any]) ?? [:]
+            return .failure(.makeBusiness(code: code, message: message, userInfo: userInfo))
+        }
+
+        // 第三步：业务成功，才把原始 data 解码为 T。
+        guard let dataValue = envelope["data"], !(dataValue is NSNull) else {
+            return .failure(.emptyData)
+        }
+        do {
+            // 把 data 那一段重新序列化，再用配置好的 decoder 解成 T（保持 keyDecodingStrategy 等设置）。
+            // fragmentsAllowed：兼容 data 为标量（数字/字符串/布尔）的情况。
+            let dataData = try JSONSerialization.data(withJSONObject: dataValue, options: [.fragmentsAllowed])
+            let payload = try decoder.decode(T.self, from: dataData)
             return .success(payload)
         } catch {
             return .failure(.decoding(underlying: error))
         }
     }
+}
+
+/// 解析器内部错误。
+enum BOParseError: Error {
+    /// 响应体顶层不是 JSON 对象。
+    case notObject
 }

@@ -85,8 +85,8 @@ extension Bool: BOFlexibleDecodable {
 /// // 取值：user.age（直接是 Int）
 /// ```
 ///
-/// 说明：本包装器要求字段存在。若字段可能缺失，请配合下方的可选支持
-/// （`KeyedDecodingContainer` 扩展），把属性声明为可选：`@BOFlexible var age: Int?`。
+/// 说明：本包装器要求字段存在且为非空值（无效非空值会抛解码错误，不会静默变 nil）。
+/// 若字段**可能缺失或为 null**，请改用 `@BOFlexibleOptional var age: Int?`。
 @propertyWrapper
 public struct BOFlexible<T: BOFlexibleDecodable>: Decodable {
 
@@ -117,22 +117,68 @@ public struct BOFlexible<T: BOFlexibleDecodable>: Decodable {
     }
 }
 
-/// 支持「字段可能缺失」时的可选解码：`@BOFlexible var age: Int?`。
-/// 缺失或为 null 时，`wrappedValue` 为 nil，不报错。
+/// 可选版宽容解码：字段**缺失或为 null** 时解为 nil；存在则按 `BOFlexible` 规则归一。
+///
+/// 行为约定（区分三种情况）：
+/// - 字段缺失 / JSON null → `nil`。
+/// - 合法的替代标量类型（如 `"25"` → Int）→ 转换后的值。
+/// - 无效的非空值（无法转换）→ 抛解码错误（不静默变 nil）。
+///
+/// 用法：
+/// ```swift
+/// struct User: Decodable {
+///     @BOFlexibleOptional var age: Int?     // 缺失/null → nil；"25"/25.0 → 25
+/// }
+/// ```
+///
+/// 注意：需配合下方 `KeyedDecodingContainer` 扩展，才能正确处理「键缺失」——
+/// 这是属性包装器 + 可选字段解码的标准做法。
+@propertyWrapper
+public struct BOFlexibleOptional<T: BOFlexibleDecodable>: Decodable {
+
+    public var wrappedValue: T?
+
+    public init(wrappedValue: T?) {
+        self.wrappedValue = wrappedValue
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+
+        // JSON null → nil。
+        if container.decodeNil() {
+            wrappedValue = nil
+            return
+        }
+
+        // 依次尝试各标量类型，命中即归一。
+        if let v = try? container.decode(Int.self), let r = T.fromInt(v) {
+            wrappedValue = r
+        } else if let v = try? container.decode(Double.self), let r = T.fromDouble(v) {
+            wrappedValue = r
+        } else if let v = try? container.decode(Bool.self), let r = T.fromBool(v) {
+            wrappedValue = r
+        } else if let v = try? container.decode(String.self), let r = T.fromString(v) {
+            wrappedValue = r
+        } else {
+            // 无效的非空值：抛错，不静默变 nil。
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "BOFlexibleOptional 无法把非空响应值转换为 \(T.self)"
+            )
+        }
+    }
+}
+
+/// 让 `@BOFlexibleOptional` 的属性在「键缺失」时也能解为 nil（而非抛 keyNotFound）。
 extension KeyedDecodingContainer {
     public func decode<T>(
-        _ type: BOFlexible<T>.Type,
+        _ type: BOFlexibleOptional<T>.Type,
         forKey key: Key
-    ) throws -> BOFlexible<T> where T: BOFlexibleDecodable {
-        if let value = try decodeIfPresent(BOFlexible<T>.self, forKey: key) {
-            return value
-        }
-        // 字段缺失：这种情况通常出现在 T 本身是可选类型的场景，
-        // 若目标非可选却缺失，仍会在上层因缺少键而报错，符合预期。
-        throw DecodingError.keyNotFound(
-            key,
-            .init(codingPath: codingPath, debugDescription: "缺少键 \(key.stringValue)")
-        )
+    ) throws -> BOFlexibleOptional<T> where T: BOFlexibleDecodable {
+        // 键缺失 → nil；键存在（含 null）→ 交给 BOFlexibleOptional 自身处理。
+        try decodeIfPresent(BOFlexibleOptional<T>.self, forKey: key)
+            ?? BOFlexibleOptional(wrappedValue: nil)
     }
 }
 

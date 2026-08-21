@@ -81,7 +81,8 @@ enum AuthService {
     /// （如 `window.rootViewController = LoginViewController()`）。
     @MainActor
     static func goToLogin(reason: String) {
-        AppEnvironment.tokenStore.credential = nil
+        // 退出登录：清空凭证（库内同步清 tokenStore 与认证拦截器），后续请求不再带鉴权头。
+        BONetClient.shared.clearCredential()
         print("[AuthService] 需要重新登录：\(reason) —— 此处应跳转登录页")
         // 真实项目示例：
         // let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
