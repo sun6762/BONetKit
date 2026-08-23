@@ -53,6 +53,7 @@ public final class BONetClient {
 private final class BONetRuntime {
     let configuration: BONetConfiguration
     let session: Session
+    let requestInterceptor: BORequestInterceptor
     let authInterceptor: AuthenticationInterceptor<BOAuthenticator>?
     /// 本快照独占的解码器（不与其他请求共享，避免并发解码竞争）。
     let decoder: JSONDecoder
@@ -60,11 +61,13 @@ private final class BONetRuntime {
     init(
         configuration: BONetConfiguration,
         session: Session,
+        requestInterceptor: BORequestInterceptor,
         authInterceptor: AuthenticationInterceptor<BOAuthenticator>?,
         decoder: JSONDecoder
     ) {
         self.configuration = configuration
         self.session = session
+        self.requestInterceptor = requestInterceptor
         self.authInterceptor = authInterceptor
         self.decoder = decoder
     }
@@ -90,7 +93,7 @@ public extension BONetClient {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = configuration.keyDecodingStrategy
 
-        let (session, authInterceptor) = makeSession(
+        let (session, requestInterceptor, authInterceptor) = makeSession(
             configuration: configuration,
             sessionConfiguration: sessionConfiguration
         )
@@ -98,6 +101,7 @@ public extension BONetClient {
         let newRuntime = BONetRuntime(
             configuration: configuration,
             session: session,
+            requestInterceptor: requestInterceptor,
             authInterceptor: authInterceptor,
             decoder: decoder
         )
@@ -186,11 +190,8 @@ public extension BONetClient {
             decision.ticketsToCancel.forEach { $0.cancel() }
         }
 
-        // 请求级重试覆盖：通过内部请求头把「允许非幂等重试」传递给拦截器。
-        var finalHeaders = requestContext.headers
-        if allowsRetryOnNonIdempotent {
-            finalHeaders[BORequestInterceptor.allowRetryHeader] = "1"
-        }
+        // 请求级重试覆盖：仅登记在客户端内部，不污染真实 HTTP 请求头。
+        let finalHeaders = requestContext.headers
 
         let request = makeRequest(
             session: runtime.session, url: url, method: resolvedMethod,
@@ -198,6 +199,10 @@ public extension BONetClient {
             headers: finalHeaders.isEmpty ? nil : finalHeaders,
             expiredCodes: configuration.tokenExpiredBusinessCodes
         )
+
+        if allowsRetryOnNonIdempotent {
+            runtime.requestInterceptor.allowNonIdempotentRetry(for: request)
+        }
 
         // 创建票据并登记到注册表，供手动 / 分组取消 / 去重。
         let ticket = BORequestTicket(group: group, fingerprint: fingerprint, request: request)
@@ -257,7 +262,11 @@ private extension BONetClient {
     func makeSession(
         configuration: BONetConfiguration,
         sessionConfiguration: URLSessionConfiguration
-    ) -> (session: Session, authInterceptor: AuthenticationInterceptor<BOAuthenticator>?) {
+    ) -> (
+        session: Session,
+        requestInterceptor: BORequestInterceptor,
+        authInterceptor: AuthenticationInterceptor<BOAuthenticator>?
+    ) {
         let builtInInterceptor = BORequestInterceptor(configuration: configuration)
         var interceptors: [RequestInterceptor] = [builtInInterceptor]
         var authInterceptor: AuthenticationInterceptor<BOAuthenticator>?
@@ -287,7 +296,7 @@ private extension BONetClient {
             configuration: sessionConfiguration,
             interceptor: Interceptor(interceptors: interceptors)
         )
-        return (session, authInterceptor)
+        return (session, builtInInterceptor, authInterceptor)
     }
 
     /// 创建带校验的 Alamofire 请求。配置了业务失效码时追加自定义校验。
@@ -336,6 +345,9 @@ private extension BONetClient {
     ) {
         // 无论结果如何，先从注册表移除，避免泄漏。
         unregisterTicket(id: ticket.id)
+        if let request = ticket.underlyingRequest {
+            runtime.requestInterceptor.removeRetryState(for: request)
+        }
 
         // 被主动取消：直接回 .cancelled，不走解析。
         if let afError = response.error?.asAFError, afError.isExplicitlyCancelledError {

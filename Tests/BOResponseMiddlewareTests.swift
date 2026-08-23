@@ -78,4 +78,28 @@ final class BOResponseMiddlewareTests: XCTestCase {
         let result = BOResponseMiddlewareChain.run([], context: ctx)
         XCTAssertEqual(result.data, Data("x".utf8))
     }
+
+    func testLoggingDefaultsToNoResponseBody() {
+        let middleware = BOLoggingMiddleware()
+        XCTAssertFalse(middleware.logsBody)
+    }
+
+    func testLoggingRedactsSensitiveQueryAndTruncatesBody() {
+        let url = URL(string: "https://example.com/user?access_token=secret&name=alice")!
+        let request = URLRequest(url: url)
+        let context = BOResponseContext(
+            request: request,
+            httpResponse: nil,
+            data: Data("123456789".utf8),
+            underlyingError: nil
+        )
+        let middleware = BOLoggingMiddleware(logsBody: true, maxBodyLength: 4)
+        let result = middleware.process(context, next: { $0 })
+        XCTAssertEqual(result.data, context.data)
+        XCTAssertEqual(
+            BOLoggingMiddleware.redactedURL(url),
+            "https://example.com/user?access_token=%3Credacted%3E&name=alice"
+        )
+        XCTAssertEqual(String("123456789".prefix(middleware.maxBodyLength)), "1234")
+    }
 }

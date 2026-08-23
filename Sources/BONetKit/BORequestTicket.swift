@@ -54,4 +54,7 @@ public final class BORequestTicket {
         guard let request else { return true }
         return request.isCancelled || request.isFinished
     }
+
+    /// 内部访问底层请求，用于清理请求级状态；不对库使用者公开。
+    var underlyingRequest: Request? { request }
 }

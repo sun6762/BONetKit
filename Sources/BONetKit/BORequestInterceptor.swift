@@ -18,9 +18,21 @@ import Alamofire
 final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
 
     private let configuration: BONetConfiguration
+    private var retryAllowedRequestIDs: Set<UUID> = []
+    private let retryStateQueue = DispatchQueue(label: "com.bonetkit.retry-state")
 
     init(configuration: BONetConfiguration) {
         self.configuration = configuration
+    }
+
+    /// 注册一个允许非幂等重试的请求。状态只保存在客户端内部，不会进入 HTTP Header。
+    func allowNonIdempotentRetry(for request: Request) {
+        retryStateQueue.sync { retryAllowedRequestIDs.insert(request.id) }
+    }
+
+    /// 请求结束后清理请求级重试状态，避免长期保留 Request ID。
+    func removeRetryState(for request: Request) {
+        retryStateQueue.sync { retryAllowedRequestIDs.remove(request.id) }
     }
 
     /// 在请求发出前注入公共头与鉴权信息。
@@ -79,11 +91,12 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
             return
         }
 
-        // 幂等性检查：非幂等方法默认不重试，除非请求显式开启。
+        // 幂等性检查：非幂等方法默认不重试，除非请求级内部状态显式开启。
         let method = request.request?.httpMethod?.uppercased() ?? "GET"
         let isIdempotent = Self.idempotentMethods.contains(method)
-        let explicitlyAllowed = request.request?
-            .value(forHTTPHeaderField: Self.allowRetryHeader) == "1"
+        let explicitlyAllowed = retryStateQueue.sync {
+            retryAllowedRequestIDs.contains(request.id)
+        }
         guard isIdempotent || explicitlyAllowed else {
             completion(.doNotRetry)
             return
@@ -96,9 +109,6 @@ final class BORequestInterceptor: RequestInterceptor, @unchecked Sendable {
     private static let idempotentMethods: Set<String> = [
         "GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"
     ]
-
-    /// 标记「本请求允许在非幂等方法下重试」的内部请求头。
-    static let allowRetryHeader = "X-BONet-Allow-Retry"
 
     /// 可重试的 URLError 错误码集合。
     private static let retryableURLErrorCodes: Set<URLError.Code> = [

@@ -92,27 +92,23 @@ enum BOResponseMiddlewareChain {
 
 // MARK: - 内置中间件：日志
 
-/// 日志中间件（只读观察）：打印请求 URL、状态码、耗时与原始响应体。
+/// 日志中间件（只读观察）：打印脱敏后的请求 URL、状态码、耗时与可选响应体。
 ///
 /// 仅用于调试。它不改写上下文，调用 `next` 后打印结果。
 public struct BOLoggingMiddleware: BOResponseMiddleware {
 
-    /// 是否打印响应体内容（可能较大，且可能含敏感信息）。
+    /// 是否打印响应体内容。默认关闭，避免敏感信息进入系统日志。
     public let logsBody: Bool
 
-    /// - Parameter logsBody: 是否打印响应体。默认值随构建配置而定：
-    ///   **DEBUG 默认 true，Release 默认 false**——避免生产环境把响应体（可能含
-    ///   token / 手机号等敏感数据）写入系统日志（LOG-01）。显式传值可覆盖默认。
-    public init(logsBody: Bool? = nil) {
-        if let logsBody {
-            self.logsBody = logsBody
-        } else {
-            #if DEBUG
-            self.logsBody = true
-            #else
-            self.logsBody = false
-            #endif
-        }
+    /// 响应体日志的最大字符数，超出部分会被截断。
+    public let maxBodyLength: Int
+
+    /// - Parameters:
+    ///   - logsBody: 是否打印响应体，默认关闭。
+    ///   - maxBodyLength: 响应体最多打印的字符数，默认 4,096。
+    public init(logsBody: Bool = false, maxBodyLength: Int = 4_096) {
+        self.logsBody = logsBody
+        self.maxBodyLength = max(0, maxBodyLength)
     }
 
     public func process(
@@ -122,7 +118,7 @@ public struct BOLoggingMiddleware: BOResponseMiddleware {
         let result = next(context)
 
         let method = result.request?.httpMethod ?? "?"
-        let url = result.request?.url?.absoluteString ?? "?"
+        let url = Self.redactedURL(result.request?.url)
         let status = result.httpResponse?.statusCode.description ?? "-"
         let durationText = result.duration.map { String(format: "%.3fs", $0) } ?? "-"
 
@@ -131,11 +127,32 @@ public struct BOLoggingMiddleware: BOResponseMiddleware {
             lines.append("  error: \(error.localizedDescription)")
         }
         if logsBody, let data = result.data, let body = String(data: data, encoding: .utf8) {
-            lines.append("  body: \(body)")
+            let truncated = String(body.prefix(maxBodyLength))
+            let suffix = body.count > maxBodyLength ? "... [truncated]" : ""
+            lines.append("  body: \(truncated)\(suffix)")
         }
         print(lines.joined(separator: "\n"))
 
         return result
+    }
+
+    private static let sensitiveQueryNames = [
+        "token", "access_token", "refresh_token", "password", "secret",
+        "authorization", "cookie", "phone", "mobile", "idcard"
+    ]
+
+    static func redactedURL(_ url: URL?) -> String {
+        guard let url else { return "?" }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems else {
+            return url.absoluteString
+        }
+        components.queryItems = items.map { item in
+            let name = item.name.lowercased()
+            let shouldRedact = sensitiveQueryNames.contains { name == $0 || name.contains($0) }
+            return shouldRedact ? URLQueryItem(name: item.name, value: "<redacted>") : item
+        }
+        return components.url?.absoluteString ?? url.absoluteString
     }
 }
 

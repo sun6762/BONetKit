@@ -9,6 +9,19 @@ import Alamofire
 
 final class BORequestInterceptorTests: XCTestCase {
 
+    func testInternalRetryMarkerIsNotAnHTTPHeader() {
+        let config = BONetConfiguration(baseURL: "https://x")
+        let interceptor = BORequestInterceptor(configuration: config)
+        var request = URLRequest(url: URL(string: "https://x/submit")!)
+        interceptor.adapt(request, for: Session.default) { result in
+            if case .success(let adapted) = result {
+                XCTAssertNil(adapted.value(forHTTPHeaderField: "X-BONet-Allow-Retry"))
+            } else {
+                XCTFail("请求适配不应失败")
+            }
+        }
+    }
+
     /// 用 adapt 处理一个请求，返回处理后的请求头。
     private func adaptedHeaders(
         commonHeaders: [String: String],
