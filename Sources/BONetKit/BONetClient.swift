@@ -193,7 +193,7 @@ public extension BONetClient {
             let decision = reserveFingerprint(fp, policy: deduplication)
             // discardNew 且已有相同请求在跑 → 丢弃本次。
             guard decision.shouldProceed else {
-                deliver(.failure(.cancelled), to: errorHandler, completion: completion)
+                deliver(.failure(.deduplicated), to: errorHandler, completion: completion)
                 return nil
             }
             // cancelPrevious → 在临界区外取消收集到的旧请求。

@@ -32,6 +32,9 @@ public enum BONetError: Error {
     /// 请求被主动取消（手动 cancel 或分组取消）。通常无需向用户提示为错误。
     case cancelled
 
+    /// 请求因 `.discardNew` 去重策略命中已有进行中请求而未发出。
+    case deduplicated
+
     /// 其他未归类错误。
     case unknown(underlying: Error?)
 
@@ -69,6 +72,8 @@ extension BONetError: LocalizedError {
             return "未收到有效响应数据"
         case .cancelled:
             return "请求已取消"
+        case .deduplicated:
+            return "请求已被去重策略丢弃"
         case .unknown(let underlying):
             return "未知错误：\(underlying?.localizedDescription ?? "无详情")"
         }
@@ -77,6 +82,12 @@ extension BONetError: LocalizedError {
     /// 是否为主动取消。
     public var isCancelled: Bool {
         if case .cancelled = self { return true }
+        return false
+    }
+
+    /// 是否因去重策略而未发出。
+    public var isDeduplicated: Bool {
+        if case .deduplicated = self { return true }
         return false
     }
 

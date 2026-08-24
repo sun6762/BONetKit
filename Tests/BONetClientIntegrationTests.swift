@@ -129,6 +129,38 @@ final class BONetClientIntegrationTests: XCTestCase {
         wait(for: [firstExp, secondExp], timeout: 5)
     }
 
+    func testDiscardNewReturnsDeduplicatedWithoutStartingSecondRequest() {
+        TestMockURLProtocol.slowPaths = ["discard"]
+        TestMockURLProtocol.routes["discard"] = (200, #"{ "code": 0, "message": "ok", "data": { "id": 1 } }"#)
+        var requestCount = 0
+        TestMockURLProtocol.requestObserver = { _ in requestCount += 1 }
+
+        let firstExp = expectation(description: "first done")
+        let discardedExp = expectation(description: "second discarded")
+
+        BONetClient.shared.request(
+            "/discard", of: P.self, deduplication: .discardNew
+        ) { result in
+            XCTAssertEqual(try? result.get(), P(id: 1))
+            firstExp.fulfill()
+        }
+        let discardedTicket = BONetClient.shared.request(
+            "/discard", of: P.self, deduplication: .discardNew
+        ) { result in
+            if case .failure(let error) = result {
+                XCTAssertTrue(error.isDeduplicated)
+                XCTAssertFalse(error.isCancelled)
+            } else {
+                XCTFail("重复请求应被去重策略丢弃")
+            }
+            discardedExp.fulfill()
+        }
+
+        XCTAssertNil(discardedTicket)
+        wait(for: [discardedExp, firstExp], timeout: 5)
+        XCTAssertEqual(requestCount, 1)
+    }
+
     func testRequestMiddlewareRunsBeforeParameterEncoding() {
         struct EncryptPasswordMiddleware: BORequestMiddleware {
             func process(_ context: BORequestContext) -> BORequestContext {

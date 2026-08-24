@@ -47,12 +47,25 @@ final class BOErrorDispatcherTests: XCTestCase {
         XCTAssertNotNil(fallbackError)   // 未消费，走兜底
     }
 
-    func testFallbackWhenNoHandler() {
-        var fallbackError: BONetError?
-        BOErrorDispatcher.shared.fallbackHandler = { fallbackError = $0 }
+    func testCancellationDoesNotReachHandlerOrFallback() {
+        let handler = MockHandler(returnValue: false)
+        var fallbackCalled = false
+        BOErrorDispatcher.shared.fallbackHandler = { _ in fallbackCalled = true }
 
-        BOErrorDispatcher.shared.dispatch(.cancelled, to: nil)
+        BOErrorDispatcher.shared.dispatch(.cancelled, to: handler)
 
-        XCTAssertTrue(fallbackError?.isCancelled ?? false)
+        XCTAssertNil(handler.handled)
+        XCTAssertFalse(fallbackCalled)
+    }
+
+    func testDeduplicatedDoesNotReachHandlerOrFallback() {
+        let handler = MockHandler(returnValue: false)
+        var fallbackCalled = false
+        BOErrorDispatcher.shared.fallbackHandler = { _ in fallbackCalled = true }
+
+        BOErrorDispatcher.shared.dispatch(.deduplicated, to: handler)
+
+        XCTAssertNil(handler.handled)
+        XCTAssertFalse(fallbackCalled)
     }
 }

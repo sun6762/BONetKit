@@ -206,7 +206,8 @@ BONetConfiguration(
 ## 请求取消
 
 `request(...)` 返回一个 `BORequestTicket?` 票据（`@discardableResult`，不接收返回值也可）。
-请求被取消时，回调返回 `BONetError.cancelled`（可用 `error.isCancelled` 判断），通常无需提示为错误。
+请求被取消时，回调返回 `BONetError.cancelled`（可用 `error.isCancelled` 判断）。取消和去重属于
+预期控制流，不会进入局部错误处理器或全局 `fallbackHandler`。
 
 ### 手动取消
 
@@ -252,7 +253,8 @@ BONetClient.shared.request(
 | `.cancelPrevious` | 取消进行中的旧请求，发起新的 | 搜索框输入、筛选（新的作废旧的） |
 | `.discardNew` | 已有相同请求在跑则丢弃新的，不发起 | 防重复提交（狂点按钮） |
 
-被取消（`.cancelPrevious`）或被丢弃（`.discardNew`）的请求，其回调返回 `.cancelled`。默认 `.none`，逐请求控制。
+被 `.cancelPrevious` 取消的旧请求回调返回 `.cancelled`；被 `.discardNew` 丢弃的新请求返回
+`.deduplicated`，可通过 `error.isDeduplicated` 判断。默认 `.none`，逐请求控制。
 
 相同请求的判定默认基于 `method + URL + 规范化参数`（嵌套字典键会递归排序，参数顺序不影响判定）。
 复杂参数或自定义编码场景，可显式传 `deduplicationKey` 指定去重键：
@@ -555,7 +557,8 @@ struct Feed: Decodable {
 | `.decoding(underlying:)` | 响应体解码失败 |
 | `.business(code:message:userInfo:)` | 后端业务错误（`code != 0`），可携带附加数据 |
 | `.emptyData` | 无有效响应数据 |
-| `.cancelled` | 请求被主动取消（手动 / 分组 / 去重），可用 `isCancelled` 判断 |
+| `.cancelled` | 请求被主动取消（手动 / 分组 / `cancelPrevious`），可用 `isCancelled` 判断 |
+| `.deduplicated` | 新请求被 `discardNew` 去重策略丢弃，可用 `isDeduplicated` 判断 |
 | `.unknown(underlying:)` | 其他未归类错误 |
 
 ### 业务错误的附加数据

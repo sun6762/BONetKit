@@ -43,6 +43,9 @@ public final class BOErrorDispatcher {
     ///   - error: 待处理的错误。
     ///   - handler: 本次请求指定的处理者（通常是发起请求的业务控制器），可为空。
     func dispatch(_ error: BONetError, to handler: BOErrorHandlerProtocol?) {
+        // 取消和去重是预期控制流，只通过请求 completion 返回，不触发业务错误提示或上报。
+        guard !error.isCancelled, !error.isDeduplicated else { return }
+
         // 优先交给显式指定的处理者；其未消费时走全局兜底。
         if let handler, handler.handleError(error) {
             return

@@ -28,7 +28,13 @@ final class BONetErrorTests: XCTestCase {
 
     func testIsCancelled() {
         XCTAssertTrue(BONetError.cancelled.isCancelled)
+        XCTAssertFalse(BONetError.deduplicated.isCancelled)
         XCTAssertFalse(BONetError.emptyData.isCancelled)
+    }
+
+    func testIsDeduplicated() {
+        XCTAssertTrue(BONetError.deduplicated.isDeduplicated)
+        XCTAssertFalse(BONetError.cancelled.isDeduplicated)
     }
 
     func testErrorDescriptionNotNil() {
@@ -39,6 +45,7 @@ final class BONetErrorTests: XCTestCase {
             .makeBusiness(code: 1, message: "m"),
             .emptyData,
             .cancelled,
+            .deduplicated,
             .unknown(underlying: nil)
         ]
         for error in errors {
