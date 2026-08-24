@@ -67,6 +67,9 @@ public struct BODefaultResponseParser: BOResponseParser {
         }
 
         guard let data = context.data, !data.isEmpty else {
+            if let emptyResponse = BOEmptyResponse() as? T {
+                return .success(emptyResponse)
+            }
             return .failure(.emptyData)
         }
 
@@ -93,6 +96,9 @@ public struct BODefaultResponseParser: BOResponseParser {
 
         // 第三步：业务成功，才把原始 data 解码为 T。
         guard let dataValue = envelope["data"], !(dataValue is NSNull) else {
+            if let emptyResponse = BOEmptyResponse() as? T {
+                return .success(emptyResponse)
+            }
             return .failure(.emptyData)
         }
         do {

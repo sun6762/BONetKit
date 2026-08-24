@@ -6,6 +6,29 @@
 import Foundation
 import Alamofire
 
+/// 网络客户端配置校验错误。
+public enum BONetConfigurationError: Error, Equatable, Sendable {
+    case invalidBaseURL(String)
+    case unsupportedScheme(String)
+    case invalidTimeout(TimeInterval)
+    case negativeMaxRetryCount(Int)
+}
+
+extension BONetConfigurationError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidBaseURL(let value):
+            return "baseURL 不是包含 Host 的有效 URL：\(value)"
+        case .unsupportedScheme(let scheme):
+            return "baseURL 仅支持 HTTP/HTTPS，当前 Scheme：\(scheme)"
+        case .invalidTimeout(let value):
+            return "timeoutInterval 必须是大于 0 的有限值，当前值：\(value)"
+        case .negativeMaxRetryCount(let value):
+            return "maxRetryCount 不能小于 0，当前值：\(value)"
+        }
+    }
+}
+
 /// 网络客户端配置。
 ///
 /// 其中的闭包属性标注为 `@Sendable`，调用方传入时需保证线程安全（例如读取 token 时）。
@@ -133,5 +156,25 @@ public struct BONetConfiguration {
         self.keyDecodingStrategy = keyDecodingStrategy
         self.responseMiddlewares = responseMiddlewares
         self.responseParser = responseParser
+    }
+
+    /// 校验会影响请求创建和重试行为的基础配置。
+    public func validate() throws {
+        guard let components = URLComponents(string: baseURL),
+              components.url != nil,
+              let scheme = components.scheme,
+              let host = components.host,
+              !host.isEmpty else {
+            throw BONetConfigurationError.invalidBaseURL(baseURL)
+        }
+        guard scheme.lowercased() == "http" || scheme.lowercased() == "https" else {
+            throw BONetConfigurationError.unsupportedScheme(scheme)
+        }
+        guard timeoutInterval.isFinite, timeoutInterval > 0 else {
+            throw BONetConfigurationError.invalidTimeout(timeoutInterval)
+        }
+        guard maxRetryCount >= 0 else {
+            throw BONetConfigurationError.negativeMaxRetryCount(maxRetryCount)
+        }
     }
 }

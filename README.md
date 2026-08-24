@@ -37,15 +37,20 @@ App 启动时配置一次：
 ```swift
 import BONetKit
 
-BONetClient.shared.configure(
-    BONetConfiguration(
+do {
+    try BONetClient.shared.configure(validating: BONetConfiguration(
         baseURL: "https://api.example.com",
         timeoutInterval: 30,
         commonHeaders: ["Accept": "application/json"],
         maxRetryCount: 1
-    )
-)
+    ))
+} catch {
+    assertionFailure("网络配置无效：\(error.localizedDescription)")
+}
 ```
+
+`configure(validating:)` 会在创建 Session 前检查 Base URL、超时时间和重试次数。
+现有 `configure(_:)` 继续保留，适合已经确认合法的静态配置。
 
 需要同时连接多个服务或隔离不同业务的鉴权、Session 和请求状态时，可创建独立客户端：
 
@@ -86,6 +91,24 @@ BONetClient.shared.request(
     }
 }
 ```
+
+### 空响应接口
+
+对于 HTTP 204，或其他成功但不返回响应体的接口，使用 `BOEmptyResponse` 明确表示预期无数据：
+
+```swift
+BONetClient.shared.request(
+    "/session",
+    method: .delete,
+    of: BOEmptyResponse.self
+) { result in
+    if case .success = result {
+        print("删除成功")
+    }
+}
+```
+
+普通模型遇到空响应时仍返回 `.emptyData`，避免掩盖后端漏传数据的问题。
 
 ## 鉴权与 Token 刷新
 

@@ -81,6 +81,12 @@ private final class BONetRuntime {
 
 public extension BONetClient {
 
+    /// 校验配置后初始化客户端。非法配置会在创建 Session 前抛出明确错误。
+    func configure(validating configuration: BONetConfiguration) throws {
+        try configuration.validate()
+        configure(configuration)
+    }
+
     /// 使用给定配置初始化客户端。通常在 App 启动时调用一次。
     /// - Parameter configuration: 网络配置。
     func configure(_ configuration: BONetConfiguration) {

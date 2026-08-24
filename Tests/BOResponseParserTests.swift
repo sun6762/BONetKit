@@ -60,6 +60,24 @@ final class BOResponseParserTests: XCTestCase {
         }
     }
 
+    func testParse204AsExpectedEmptyResponse() {
+        let ctx = context(status: 204, json: nil)
+        let result = parser.parse(ctx, as: BOEmptyResponse.self, decoder: decoder)
+        XCTAssertEqual(try? result.get(), BOEmptyResponse())
+    }
+
+    func testParse200EmptyBodyAsExpectedEmptyResponse() {
+        let ctx = context(status: 200, json: "")
+        let result = parser.parse(ctx, as: BOEmptyResponse.self, decoder: decoder)
+        XCTAssertEqual(try? result.get(), BOEmptyResponse())
+    }
+
+    func testParseSuccessfulEnvelopeWithNullDataAsExpectedEmptyResponse() {
+        let ctx = context(json: #"{ "code": 0, "message": "ok", "data": null }"#)
+        let result = parser.parse(ctx, as: BOEmptyResponse.self, decoder: decoder)
+        XCTAssertEqual(try? result.get(), BOEmptyResponse())
+    }
+
     func testParseDecodingError() {
         let ctx = context(json: #"{ "code": 0, "data": { "id": "not-int" } }"#)
         let result = parser.parse(ctx, as: P.self, decoder: decoder)
