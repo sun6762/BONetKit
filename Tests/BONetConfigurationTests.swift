@@ -56,4 +56,10 @@ final class BONetConfigurationTests: XCTestCase {
             XCTAssertEqual(error as? BONetConfigurationError, .negativeMaxRetryCount(-1))
         }
     }
+
+    func testNonThrowingConfigureReturnsValidationError() {
+        let configuration = BONetConfiguration(baseURL: "not-a-url")
+        let error = BONetClient.shared.configure(configuration)
+        XCTAssertEqual(error, .invalidBaseURL("not-a-url"))
+    }
 }

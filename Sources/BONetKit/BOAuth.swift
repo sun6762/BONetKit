@@ -102,9 +102,12 @@ public final class BOInMemoryTokenStore: BOTokenStore, @unchecked Sendable {
     public var credential: BOCredential? {
         get { queue.sync { _credential } }
         set {
-            queue.sync(flags: .barrier) { self._credential = newValue }
-            // 通知观察者（在栅栏写之外调用，避免持写锁期间执行外部回调）。
-            credentialObserver?(newValue)
+            let observer = queue.sync(flags: .barrier) {
+                self._credential = newValue
+                return self.credentialObserver
+            }
+            // 调用临界区内取得的快照，避免无保护读取，也避免持写锁执行外部回调。
+            observer?(newValue)
         }
     }
 

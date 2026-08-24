@@ -160,21 +160,28 @@ public struct BONetConfiguration {
 
     /// 校验会影响请求创建和重试行为的基础配置。
     public func validate() throws {
+        if let validationError {
+            throw validationError
+        }
+    }
+
+    var validationError: BONetConfigurationError? {
         guard let components = URLComponents(string: baseURL),
               components.url != nil,
               let scheme = components.scheme,
               let host = components.host,
               !host.isEmpty else {
-            throw BONetConfigurationError.invalidBaseURL(baseURL)
+            return .invalidBaseURL(baseURL)
         }
         guard scheme.lowercased() == "http" || scheme.lowercased() == "https" else {
-            throw BONetConfigurationError.unsupportedScheme(scheme)
+            return .unsupportedScheme(scheme)
         }
         guard timeoutInterval.isFinite, timeoutInterval > 0 else {
-            throw BONetConfigurationError.invalidTimeout(timeoutInterval)
+            return .invalidTimeout(timeoutInterval)
         }
         guard maxRetryCount >= 0 else {
-            throw BONetConfigurationError.negativeMaxRetryCount(maxRetryCount)
+            return .negativeMaxRetryCount(maxRetryCount)
         }
+        return nil
     }
 }

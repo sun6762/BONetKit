@@ -68,4 +68,51 @@ final class BODeduplicationTests: XCTestCase {
         let b = BONetClient.fingerprint(method: .post, url: "https://x/a", parameters: nil)
         XCTAssertNotEqual(a, b)
     }
+
+    func testFingerprintDiffersForHeadersEncodingAndAuthentication() {
+        let base = BONetClient.fingerprint(
+            method: .post, url: "https://x/a", parameters: ["id": 1],
+            headers: ["X-Tenant": "a"], encodingIdentifier: "json",
+            authenticationIdentity: "Authorization:token-a"
+        )
+        let differentHeader = BONetClient.fingerprint(
+            method: .post, url: "https://x/a", parameters: ["id": 1],
+            headers: ["X-Tenant": "b"], encodingIdentifier: "json",
+            authenticationIdentity: "Authorization:token-a"
+        )
+        let differentEncoding = BONetClient.fingerprint(
+            method: .post, url: "https://x/a", parameters: ["id": 1],
+            headers: ["X-Tenant": "a"], encodingIdentifier: "url",
+            authenticationIdentity: "Authorization:token-a"
+        )
+        let differentAuthentication = BONetClient.fingerprint(
+            method: .post, url: "https://x/a", parameters: ["id": 1],
+            headers: ["X-Tenant": "a"], encodingIdentifier: "json",
+            authenticationIdentity: "Authorization:token-b"
+        )
+
+        XCTAssertNotEqual(base, differentHeader)
+        XCTAssertNotEqual(base, differentEncoding)
+        XCTAssertNotEqual(base, differentAuthentication)
+        XCTAssertFalse(base.contains("token-a"))
+        XCTAssertFalse(base.contains("https://x/a"))
+    }
+
+    func testFingerprintHeaderNamesAreCaseInsensitive() {
+        let upper = BONetClient.fingerprint(
+            method: .get, url: "https://x/a", parameters: nil,
+            headers: ["X-Tenant": "a"]
+        )
+        let lower = BONetClient.fingerprint(
+            method: .get, url: "https://x/a", parameters: nil,
+            headers: ["x-tenant": "a"]
+        )
+        XCTAssertEqual(upper, lower)
+    }
+
+    func testCustomDeduplicationKeyIsHashed() {
+        let fingerprint = BONetClient.fingerprint(forCustomKey: "user-secret-key")
+        XCTAssertFalse(fingerprint.contains("user-secret-key"))
+        XCTAssertEqual(fingerprint, BONetClient.fingerprint(forCustomKey: "user-secret-key"))
+    }
 }

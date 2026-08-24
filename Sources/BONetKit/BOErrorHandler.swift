@@ -3,7 +3,7 @@
 //  BONetKit
 //
 
-import UIKit
+import Foundation
 
 /// 错误处理协议。业务控制器可遵守该协议并实现 `handleError(_:)`，
 /// 以接管网络错误的展示与处理。

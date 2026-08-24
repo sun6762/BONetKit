@@ -50,19 +50,7 @@ do {
 ```
 
 `configure(validating:)` 会在创建 Session 前检查 Base URL、超时时间和重试次数。
-现有 `configure(_:)` 继续保留，适合已经确认合法的静态配置。
-
-需要同时连接多个服务或隔离不同业务的鉴权、Session 和请求状态时，可创建独立客户端：
-
-```swift
-let accountClient = BONetClient()
-accountClient.configure(BONetConfiguration(baseURL: "https://account.example.com"))
-
-let contentClient = BONetClient()
-contentClient.configure(BONetConfiguration(baseURL: "https://content.example.com"))
-```
-
-每个实例独立持有配置、鉴权状态、进行中请求和去重状态；`BONetClient.shared` 的行为保持不变。
+现有 `configure(_:)` 也执行相同校验，非法配置不会生效，并通过可忽略的返回值提供错误。
 
 鉴权（注入 token、自动刷新）通过 `tokenStore` / `tokenRefresh` 配置，见「鉴权与 Token 刷新」。
 
@@ -236,7 +224,7 @@ BONetClient.shared.cancelAll()                 // 取消所有进行中请求
 ### 自动去重
 
 通过 `deduplication` 参数（`BODeduplicationPolicy`）控制：发起时若已有「相同请求」进行中，
-按策略处理。相同的判定依据是 `method + URL + 参数`（参数不同则视为不同请求）：
+按策略处理。相同的判定依据包含 method、URL、参数、有效请求头、编码方式和鉴权身份：
 
 ```swift
 BONetClient.shared.request(
@@ -256,7 +244,7 @@ BONetClient.shared.request(
 被 `.cancelPrevious` 取消的旧请求回调返回 `.cancelled`；被 `.discardNew` 丢弃的新请求返回
 `.deduplicated`，可通过 `error.isDeduplicated` 判断。默认 `.none`，逐请求控制。
 
-相同请求的判定默认基于 `method + URL + 规范化参数`（嵌套字典键会递归排序，参数顺序不影响判定）。
+请求信息会先规范化，再整体计算摘要；参数、Header、鉴权身份和自定义去重键均不保存明文。
 复杂参数或自定义编码场景，可显式传 `deduplicationKey` 指定去重键：
 
 ```swift

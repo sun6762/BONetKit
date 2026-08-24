@@ -203,40 +203,4 @@ final class BONetClientIntegrationTests: XCTestCase {
         wait(for: [observed, completed], timeout: 5)
     }
 
-    func testIndependentClientsKeepConfigurationsIsolated() {
-        TestMockURLProtocol.routes["client-a"] = (200, #"{ "code": 0, "message": "ok", "data": { "id": 1 } }"#)
-        TestMockURLProtocol.routes["client-b"] = (200, #"{ "code": 0, "message": "ok", "data": { "id": 2 } }"#)
-
-        let clientA = BONetClient()
-        clientA.configure(BONetConfiguration(
-            baseURL: "https://a.example.com",
-            protocolClasses: [TestMockURLProtocol.self]
-        ))
-        let clientB = BONetClient()
-        clientB.configure(BONetConfiguration(
-            baseURL: "https://b.example.com",
-            protocolClasses: [TestMockURLProtocol.self]
-        ))
-
-        var observedHosts: [String] = []
-        TestMockURLProtocol.requestObserver = { request in
-            if let host = request.url?.host { observedHosts.append(host) }
-        }
-
-        let first = expectation(description: "client A")
-        clientA.request("/client-a", of: P.self) { result in
-            XCTAssertEqual(try? result.get(), P(id: 1))
-            first.fulfill()
-        }
-        wait(for: [first], timeout: 5)
-
-        let second = expectation(description: "client B")
-        clientB.request("/client-b", of: P.self) { result in
-            XCTAssertEqual(try? result.get(), P(id: 2))
-            second.fulfill()
-        }
-        wait(for: [second], timeout: 5)
-
-        XCTAssertEqual(observedHosts, ["a.example.com", "b.example.com"])
-    }
 }

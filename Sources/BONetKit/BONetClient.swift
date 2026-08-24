@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import CryptoKit
 import Alamofire
 
 /// 网络请求入口。
@@ -42,11 +43,7 @@ public final class BONetClient {
 
     // MARK: - Init
 
-    /// 创建一个状态完全独立的网络客户端。
-    ///
-    /// 每个实例分别持有配置、Session、鉴权状态、请求注册表和去重状态。
-    /// 创建后需先调用 `configure(_:)`；仅需单一全局配置时可继续使用 `shared`。
-    public init() {}
+    private init() {}
 }
 
 /// 一次配置生效后的不可变运行时快照。
@@ -83,13 +80,21 @@ public extension BONetClient {
 
     /// 校验配置后初始化客户端。非法配置会在创建 Session 前抛出明确错误。
     func configure(validating configuration: BONetConfiguration) throws {
-        try configuration.validate()
-        configure(configuration)
+        if let error = configure(configuration) {
+            throw error
+        }
     }
 
-    /// 使用给定配置初始化客户端。通常在 App 启动时调用一次。
+    /// 使用给定配置初始化客户端。非法配置不会生效，并作为返回值交给调用方。
+    /// 已有调用可继续忽略返回值；需要抛错语义时使用 `configure(validating:)`。
     /// - Parameter configuration: 网络配置。
-    func configure(_ configuration: BONetConfiguration) {
+    /// - Returns: 配置合法时为 nil，否则返回具体校验错误。
+    @discardableResult
+    func configure(_ configuration: BONetConfiguration) -> BONetConfigurationError? {
+        if let error = configuration.validationError {
+            return error
+        }
+
         let sessionConfiguration = URLSessionConfiguration.af.default
         sessionConfiguration.timeoutIntervalForRequest = configuration.timeoutInterval
 
@@ -120,6 +125,7 @@ public extension BONetClient {
         stateLock.lock()
         self.runtime = newRuntime
         stateLock.unlock()
+        return nil
     }
 
     /// 发起请求并将响应解码为指定模型。
@@ -177,6 +183,14 @@ public extension BONetClient {
         let resolvedMethod = requestContext.method
         let resolvedParameters = requestContext.parameters
         let url = Self.resolveURL(path: resolvedPath, baseURL: configuration.baseURL)
+        let resolvedEncoding = encoding ?? Self.defaultEncoding(for: resolvedMethod)
+        let fingerprintHeaders = Self.mergedHeaders(
+            common: configuration.commonHeaders,
+            request: requestContext.headers
+        )
+        let authenticationIdentity = configuration.tokenStore.flatMap { store in
+            store.credential.map { "\(store.headerField):\($0.accessToken)" }
+        }
 
         // 去重处理：在单个临界区内原子完成「检查 + 决策 + 预留」（DEDUP-02），
         // 避免两个相同请求的检查与注册交错导致都被放行。
@@ -184,11 +198,15 @@ public extension BONetClient {
         if deduplication != .none {
             // 调用方显式提供 deduplicationKey 时优先用它（应对复杂参数 / 自定义编码）；
             // 否则用 method + URL + 规范化参数自动计算。
-            let fp = deduplicationKey ?? Self.fingerprint(
-                method: resolvedMethod,
-                url: url,
-                parameters: resolvedParameters
-            )
+            let fp = deduplicationKey.map(Self.fingerprint(forCustomKey:))
+                ?? Self.fingerprint(
+                    method: resolvedMethod,
+                    url: url,
+                    parameters: resolvedParameters,
+                    headers: fingerprintHeaders,
+                    encodingIdentifier: String(reflecting: resolvedEncoding),
+                    authenticationIdentity: authenticationIdentity
+                )
             fingerprint = fp
             let decision = reserveFingerprint(fp, policy: deduplication)
             // discardNew 且已有相同请求在跑 → 丢弃本次。
@@ -205,7 +223,7 @@ public extension BONetClient {
 
         let request = makeRequest(
             session: runtime.session, url: url, method: resolvedMethod,
-            parameters: resolvedParameters, encoding: encoding,
+            parameters: resolvedParameters, encoding: resolvedEncoding,
             headers: finalHeaders.isEmpty ? nil : finalHeaders,
             expiredCodes: configuration.tokenExpiredBusinessCodes
         )
@@ -223,6 +241,8 @@ public extension BONetClient {
             self?.handleResponse(response, ticket: ticket, runtime: runtime, as: T.self,
                                  errorHandler: errorHandler, completion: completion)
         }
+        // Session 禁止自动启动；所有请求级状态与回调安装完成后再真正发送。
+        request.resume()
 
         return ticket
     }
@@ -304,6 +324,7 @@ private extension BONetClient {
 
         let session = Session(
             configuration: sessionConfiguration,
+            startRequestsImmediately: false,
             interceptor: Interceptor(interceptors: interceptors)
         )
         return (session, builtInInterceptor, authInterceptor)
@@ -490,20 +511,64 @@ private extension BONetClient {
 
 extension BONetClient {
 
-    /// 计算请求去重指纹：method + 完整 URL + 规范化后的参数。
+    /// 计算请求去重指纹：method、URL、参数、有效请求头、编码方式和鉴权身份。
     ///
     /// 参数用 `JSONSerialization` 的 `.sortedKeys` 规范化——**嵌套字典的键也会递归排序**，
     /// 因此参数插入顺序不影响指纹（DEDUP-01）。无法序列化时回退到排序键值对拼接。
     static func fingerprint(
         method: HTTPMethod,
         url: String,
-        parameters: [String: Any]?
+        parameters: [String: Any]?,
+        headers: [String: String]? = nil,
+        encodingIdentifier: String? = nil,
+        authenticationIdentity: String? = nil
     ) -> String {
-        var parts = [method.rawValue, url]
+        var material = ["method": method.rawValue, "url": url]
         if let parameters, !parameters.isEmpty {
-            parts.append(normalizedParameters(parameters))
+            material["parameters"] = normalizedParameters(parameters)
         }
-        return parts.joined(separator: "|")
+        if let headers, !headers.isEmpty {
+            let normalized = headers
+                .map { ($0.key.lowercased(), $0.value) }
+                .sorted { $0.0 < $1.0 }
+                .map { "\($0.0):\($0.1)" }
+                .joined(separator: "\n")
+            material["headers"] = normalized
+        }
+        if let encodingIdentifier {
+            material["encoding"] = encodingIdentifier
+        }
+        if let authenticationIdentity {
+            material["authentication"] = authenticationIdentity
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: material, options: [.sortedKeys]))
+            ?? Data(material.sorted { $0.key < $1.key }
+                .map { "\($0.key.utf8.count):\($0.key)\($0.value.utf8.count):\($0.value)" }
+                .joined().utf8)
+        return sha256(data)
+    }
+
+    /// 合并公共头和单次请求头，字段名按 HTTP 规则大小写不敏感，单次请求优先。
+    static func mergedHeaders(
+        common: [String: String],
+        request: [String: String]
+    ) -> [String: String] {
+        var result: [String: String] = [:]
+        for (field, value) in common.sorted(by: { $0.key < $1.key }) {
+            result[field.lowercased()] = value
+        }
+        for (field, value) in request.sorted(by: { $0.key < $1.key }) {
+            result[field.lowercased()] = value
+        }
+        return result
+    }
+
+    static func fingerprint(forCustomKey key: String) -> String {
+        sha256(Data(key.utf8))
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// 把参数规范化为稳定字符串：优先用 sortedKeys 的 JSON；失败则回退。

@@ -15,6 +15,16 @@ final class BOAuthTests: XCTestCase {
         XCTAssertEqual(store.credential?.accessToken, "a")
     }
 
+    func testInMemoryStoreNotifiesCredentialObserver() {
+        let store = BOInMemoryTokenStore()
+        var observedToken: String?
+        store.setCredentialObserver { observedToken = $0?.accessToken }
+
+        store.credential = BOCredential(accessToken: "updated")
+
+        XCTAssertEqual(observedToken, "updated")
+    }
+
     func testHeaderValueDefault() {
         let store = BOInMemoryTokenStore()
         XCTAssertEqual(store.headerField, "Authorization")
