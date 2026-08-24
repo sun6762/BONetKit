@@ -9,6 +9,32 @@ import Alamofire
 
 final class BODeduplicationTests: XCTestCase {
 
+    // MARK: - URL 解析
+
+    func testResolveURLAppendsToBasePathAndMergesQuery() {
+        let result = BONetClient.resolveURL(
+            path: "/users?active=true",
+            baseURL: "https://api.example.com/v1?tenant=cn"
+        )
+        XCTAssertEqual(result, "https://api.example.com/v1/users?tenant=cn&active=true")
+    }
+
+    func testResolveURLPercentEncodesUnicodeAndSpaces() {
+        let result = BONetClient.resolveURL(
+            path: "/用户/张 三",
+            baseURL: "https://api.example.com/v1/"
+        )
+        XCTAssertEqual(result, "https://api.example.com/v1/%E7%94%A8%E6%88%B7/%E5%BC%A0%20%E4%B8%89")
+    }
+
+    func testResolveURLKeepsAbsoluteURLIndependentFromBaseURL() {
+        let result = BONetClient.resolveURL(
+            path: "https://cdn.example.com/files/a.json?token=1",
+            baseURL: "https://api.example.com/v1"
+        )
+        XCTAssertEqual(result, "https://cdn.example.com/files/a.json?token=1")
+    }
+
     // MARK: - DEDUP-01：指纹稳定性
 
     /// 顶层参数插入顺序不同，指纹应相同。

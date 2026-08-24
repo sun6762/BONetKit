@@ -42,7 +42,11 @@ public final class BONetClient {
 
     // MARK: - Init
 
-    private init() {}
+    /// 创建一个状态完全独立的网络客户端。
+    ///
+    /// 每个实例分别持有配置、Session、鉴权状态、请求注册表和去重状态。
+    /// 创建后需先调用 `configure(_:)`；仅需单一全局配置时可继续使用 `shared`。
+    public init() {}
 }
 
 /// 一次配置生效后的不可变运行时快照。
@@ -432,11 +436,39 @@ private extension BONetClient {
         }
     }
 
-    /// 拼接最终请求 URL：`path` 为完整 URL 时直接使用，否则与 `baseURL` 拼接。
+    /// 拼接最终请求 URL：完整 URL 独立解析；相对路径与 baseURL 的 path/query 结构化合并。
     static func resolveURL(path: String, baseURL: String) -> String {
-        if path.hasPrefix("http://") || path.hasPrefix("https://") {
-            return path
+        if let absolute = URLComponents(string: path),
+           absolute.scheme != nil,
+           absolute.host != nil {
+            return absolute.string ?? path
         }
+
+        guard var base = URLComponents(string: baseURL),
+              base.scheme != nil,
+              base.host != nil,
+              let relative = URLComponents(string: path) else {
+            return legacyResolvedURL(path: path, baseURL: baseURL)
+        }
+
+        if !relative.path.isEmpty {
+            let basePath = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let relativePath = relative.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let segments = [basePath, relativePath].filter { !$0.isEmpty }
+            base.path = segments.isEmpty ? "/" : "/" + segments.joined(separator: "/")
+        }
+
+        let queryItems = (base.queryItems ?? []) + (relative.queryItems ?? [])
+        base.queryItems = queryItems.isEmpty ? nil : queryItems
+        if let fragment = relative.fragment {
+            base.fragment = fragment
+        }
+
+        return base.string ?? legacyResolvedURL(path: path, baseURL: baseURL)
+    }
+
+    /// URLComponents 无法解析非法输入时的兼容兜底。
+    private static func legacyResolvedURL(path: String, baseURL: String) -> String {
         let trimmedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         let trimmedPath = path.hasPrefix("/") ? path : "/\(path)"
         return trimmedBase + trimmedPath

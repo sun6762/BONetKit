@@ -47,6 +47,18 @@ BONetClient.shared.configure(
 )
 ```
 
+需要同时连接多个服务或隔离不同业务的鉴权、Session 和请求状态时，可创建独立客户端：
+
+```swift
+let accountClient = BONetClient()
+accountClient.configure(BONetConfiguration(baseURL: "https://account.example.com"))
+
+let contentClient = BONetClient()
+contentClient.configure(BONetConfiguration(baseURL: "https://content.example.com"))
+```
+
+每个实例独立持有配置、鉴权状态、进行中请求和去重状态；`BONetClient.shared` 的行为保持不变。
+
 鉴权（注入 token、自动刷新）通过 `tokenStore` / `tokenRefresh` 配置，见「鉴权与 Token 刷新」。
 
 ## 发起请求
