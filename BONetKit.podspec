@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BONetKit'
-  s.version          = '0.2.0'
+  s.version          = '0.3.0'
   s.summary          = '基于 Alamofire 的轻量网络请求封装工具。'
 
   s.description      = <<-DESC
